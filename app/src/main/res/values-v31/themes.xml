@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.StmtPDF.Starting" parent="Theme.StmtPDF">
+        <item name="android:windowSplashScreenBackground">@color/splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/icon_bg</item>
+        <item name="postSplashScreenTheme">@style/Theme.StmtPDF</item>
+    </style>
+</resources>

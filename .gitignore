@@ -1,0 +1,18 @@
+# Gradle 构建缓存与产物
+.gradle/
+.kotlin/
+build/
+app/build/
+*.apk
+
+# 本地环境配置（SDK 路径，机器相关）
+local.properties
+
+# 签名密钥与口令（绝不入库）
+keystore.properties
+keystore/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
