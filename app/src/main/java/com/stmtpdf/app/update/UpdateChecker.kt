@@ -37,6 +37,24 @@ object UpdateChecker {
     private const val CHUNK = 64 * 1024
     private const val HTTP_RANGE_NOT_SATISFIABLE = 416
 
+    /** HEAD 取远端字节数：-1 = 服务器说文件不存在，0 = 网络问题无法判断。 */
+    private fun remoteSize(url: String): Long = try {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = TIMEOUT_MS
+            readTimeout = TIMEOUT_MS
+            requestMethod = "HEAD"
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "StmtPDF-Android")
+        }
+        try {
+            if (conn.responseCode in 200..299) conn.contentLengthLong else -1L
+        } finally {
+            conn.disconnect()
+        }
+    } catch (e: Throwable) {
+        0L
+    }
+
     /** 检查新版；网络/解析失败静默返回 null，不影响启动。 */
     fun check(currentVersion: String): UpdateInfo? =
         (checkDetailed(currentVersion) as? UpdateCheckResult.Available)?.info
@@ -63,12 +81,20 @@ object UpdateChecker {
                 val minSupported = json.optString("min_supported").trim()
                 val forcedByFloor = minSupported.isNotEmpty() &&
                     compareVersions(currentVersion, minSupported) < 0
+                val sizeBytes = json.optLong("size_bytes", 0L)
+                // 清单已指向新版但安装包还没上传（404 / 体积不符）：按检查失败处理，
+                // 避免把用户带进「下载完必然校验失败」的死路。
+                if (sizeBytes > 0) {
+                    val remote = remoteSize(url)
+                    if (remote == -1L) return UpdateCheckResult.Failed
+                    if (remote > 0 && remote != sizeBytes) return UpdateCheckResult.Failed
+                }
                 UpdateCheckResult.Available(
                     UpdateInfo(
                         version = version,
                         url = url,
                         sha256 = json.optString("sha256"),
-                        sizeBytes = json.optLong("size_bytes", 0L),
+                        sizeBytes = sizeBytes,
                         force = json.optBoolean("force", false) || forcedByFloor
                     )
                 )
@@ -94,10 +120,16 @@ object UpdateChecker {
         val target = File(dir, "StmtPDF-${info.version}.apk")
         val temp = File(dir, "StmtPDF-${info.version}.apk.part")
 
-        // 已下完（用户上次在安装器点了取消）：直接复用，不重复下载
+        // 已下完（用户上次在安装器点了取消）：体积与哈希都对得上才复用，否则重下
         if (target.isFile && target.length() > 0) {
-            onProgress(100, target.length(), target.length())
-            return target
+            val expected = info.sha256.trim().lowercase(Locale.US)
+            val sizeOk = info.sizeBytes <= 0 || target.length() == info.sizeBytes
+            val hashOk = expected.isEmpty() || sha256(target) == expected
+            if (sizeOk && hashOk) {
+                onProgress(100, target.length(), target.length())
+                return target
+            }
+            target.delete()
         }
 
         var existing = if (temp.isFile) temp.length() else 0L
