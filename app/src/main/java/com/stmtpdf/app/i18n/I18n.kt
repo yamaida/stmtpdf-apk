@@ -6,14 +6,14 @@ import java.util.Locale
 /** App 支持的语言，默认英文。 */
 enum class AppLang(val code: String, val short: String, val label: String) {
     EN("en", "EN", "English"),
-    ZH_CN("zh_CN", "中", "简体中文"),
-    ZH_TW("zh_TW", "繁", "繁體中文"),
-    ES("es", "ES", "Español"),
-    FR("fr_CA", "FR", "Français (Canada)"),
-    FR_FR("fr_FR", "FR", "Français (France)"),
-    PT_BR("pt_BR", "PT", "Português (Brasil)"),
-    DE("de_DE", "DE", "Deutsch"),
-    JA("ja_JP", "JA", "日本語");
+    ZH_CN("zh_CN", "中", "Chinese (Simplified)"),
+    ZH_TW("zh_TW", "繁", "Chinese (Traditional)"),
+    ES("es", "ES", "Spanish"),
+    FR("fr_CA", "FR", "French (Canada)"),
+    FR_FR("fr_FR", "FR", "French (France)"),
+    PT_BR("pt_BR", "PT", "Portuguese (Brazil)"),
+    DE("de_DE", "DE", "German"),
+    JA("ja_JP", "JA", "Japanese");
 
     companion object {
         fun from(code: String?): AppLang = entries.firstOrNull { it.code == code } ?: EN
