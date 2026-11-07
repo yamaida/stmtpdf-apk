@@ -114,11 +114,15 @@ object UpdateChecker {
         context: Context,
         info: UpdateInfo,
         onProgress: (percent: Int, received: Long, total: Long) -> Unit,
-        isCancelled: () -> Boolean
+        isCancelled: () -> Boolean,
+        retried: Boolean = false
     ): File {
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-        val target = File(dir, "StmtPDF-${info.version}.apk")
-        val temp = File(dir, "StmtPDF-${info.version}.apk.part")
+        // 文件名带上清单里的哈希前 12 位：换了包就是新文件名，
+        // 不会再把上一版的 .part / 已下载文件拼进来（这正是坏包的成因）。
+        val tag = info.sha256.trim().lowercase(Locale.US).take(12).ifEmpty { "nohash" }
+        val target = File(dir, "StmtPDF-${info.version}-$tag.apk")
+        val temp = File(dir, "StmtPDF-${info.version}-$tag.apk.part")
 
         // 已下完（用户上次在安装器点了取消）：体积与哈希都对得上才复用，否则重下
         if (target.isFile && target.length() > 0) {
@@ -201,6 +205,10 @@ object UpdateChecker {
                 val actual = sha256(temp)
                 if (actual != expected) {
                     temp.delete()
+                    // 哈希不符多为历史断点/缓存污染：清干净后整包重下一次
+                    if (!retried) {
+                        return download(context, info, onProgress, isCancelled, retried = true)
+                    }
                     throw IOException("SHA-256 mismatch")
                 }
             }
