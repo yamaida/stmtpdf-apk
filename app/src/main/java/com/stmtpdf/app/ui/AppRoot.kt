@@ -40,9 +40,15 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -58,6 +64,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -164,7 +172,7 @@ class AppState(private val context: Context) {
         if (state.order.isNotEmpty() && state.order == LicenceStore.pendingOrder(context)) {
             LicenceStore.clearPendingOrder(context)
         }
-        TrialLedger.void(context)
+        TrialLedger.void(context, state.order)
         refresh()
     }
 }
@@ -188,7 +196,7 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
     val state = remember { AppState(context) }
     var tab by remember { mutableStateOf(0) }
     var lang by remember { mutableStateOf(LocaleStore.load(context)) }
-    var message by remember { mutableStateOf("") }
+    val snackbarHostState = remember { SnackbarHostState() }
     var showSplash by remember { mutableStateOf(true) }
 
     val update by UpdateState.flow.collectAsState()
@@ -203,6 +211,19 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
     var appResumed by remember { mutableStateOf(true) }
     var checkNote by remember { mutableStateOf("") }
     val updateScope = rememberCoroutineScope()
+    val notifyScope = rememberCoroutineScope()
+
+    /** 统一的操作反馈：底部 Snackbar，可带一个「分享」类动作。 */
+    fun notify(text: String, action: (() -> Unit)? = null) {
+        notifyScope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = text,
+                actionLabel = if (action != null) I18n.t(lang, "share") else null,
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) action?.invoke()
+        }
+    }
     val currentVersion = remember {
         runCatching {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: ""
@@ -322,6 +343,10 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
     LaunchedEffect(Unit) {
         if (initialUri != null) AppEvents.pendingReturn.value = initialUri
     }
+    // 启动即与服务端试用台账对账，防止重装后白拿 10 页
+    LaunchedEffect(Unit) {
+        TrialLedger.refresh(context) { state.refresh() }
+    }
     LaunchedEffect(AppEvents.pendingReturn.value) {
         val data = AppEvents.pendingReturn.value ?: return@LaunchedEffect
         AppEvents.pendingReturn.value = null
@@ -340,10 +365,10 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
         }
         if (verified != null) {
             state.apply(verified) // apply 成功后自动清除 pending
-            message = I18n.t(lang, "msg_activated")
+            notify(I18n.t(lang, "msg_activated"))
             tab = 0
         } else {
-            message = I18n.t(lang, "msg_payment_pending")
+            notify(I18n.t(lang, "msg_payment_pending"))
         }
     }
 
@@ -351,6 +376,16 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
         GlowBackground()
         Scaffold(
             containerColor = Color.Transparent,
+            snackbarHost = {
+                SnackbarHost(snackbarHostState) { data ->
+                    androidx.compose.material3.Snackbar(
+                        snackbarData = data,
+                        containerColor = Color(0xFF16212A),
+                        contentColor = Pal.Text,
+                        actionColor = Pal.Teal
+                    )
+                }
+            },
             bottomBar = { PillTabBar(tab, lang) { tab = it } }
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
@@ -362,21 +397,17 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
                             LocaleStore.save(context, it)
                         },
                         onNeedActivate = { tab = 1 },
-                        message = message,
-                        onMessage = { message = it }
+                        onNotify = { text, action -> notify(text, action) }
                     )
                     1 -> ActivateScreen(
                         context, state, lang,
-                        message = message,
-                        onMessage = { message = it }
+                        onMessage = { notify(it) }
                     )
                     else -> QuotaScreen(
                         context, state, lang,
                         onRenew = { tab = 1 },
                         onCheckUpdate = { checkUpdate(manual = true) },
-                        checkNote = checkNote,
-                        message = message,
-                        onMessage = { message = it }
+                        checkNote = checkNote
                     )
                 }
             }
@@ -628,9 +659,9 @@ private fun SplashOverlay() {
             contentAlignment = Alignment.Center
         ) {
             Image(
-                painter = painterResource(R.mipmap.ic_launcher_foreground),
+                painter = painterResource(R.drawable.logo_icon),
                 contentDescription = "StmtPDF",
-                modifier = Modifier.size(96.dp)
+                modifier = Modifier.size(88.dp).clip(RoundedCornerShape(20.dp))
             )
         }
 
@@ -683,6 +714,7 @@ private fun SplashFeature(title: String, sub: String, modifier: Modifier) {
 
 /* ---------------------------------------------------------------- Home */
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeScreen(
     engine: PdfEngine,
@@ -690,8 +722,7 @@ private fun HomeScreen(
     lang: AppLang,
     onLangPick: (AppLang) -> Unit,
     onNeedActivate: () -> Unit,
-    message: String,
-    onMessage: (String) -> Unit
+    onNotify: (String, (() -> Unit)?) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -703,12 +734,14 @@ private fun HomeScreen(
     var pagesInfo by remember { mutableStateOf("") }
     var baseName by remember { mutableStateOf("statement") }
     var history by remember { mutableStateOf(LocalStats.history(context)) }
+    var previewExpanded by remember { mutableStateOf(false) }
+    var showFormats by remember { mutableStateOf(false) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         val capacity = state.capacity()
         if (capacity <= 0) {
-            onMessage(I18n.t(lang, "quota_empty"))
+            onNotify(I18n.t(lang, "quota_empty"), null)
             onNeedActivate()
             return@rememberLauncherForActivityResult
         }
@@ -763,6 +796,7 @@ private fun HomeScreen(
         }
     }
 
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
         Spacer(Modifier.height(14.dp))
         BrandRow(
@@ -794,20 +828,13 @@ private fun HomeScreen(
             active = state.active,
             onPick = {
                 if (state.capacity() <= 0) {
-                    onMessage(I18n.t(lang, "quota_empty"))
+                    onNotify(I18n.t(lang, "quota_empty"), null)
                     onNeedActivate()
                 } else {
                     picker.launch(arrayOf("application/pdf"))
                 }
             }
         )
-
-        Spacer(Modifier.height(16.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InfoChip(I18n.t(lang, "feature_local"), Pal.Muted, Modifier.weight(1f))
-            InfoChip(I18n.t(lang, "feature_balance"), Pal.Muted, Modifier.weight(1f))
-            InfoChip(I18n.t(lang, "feature_formats"), Pal.Muted, Modifier.weight(1f))
-        }
 
         if (parsing || status.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
@@ -821,11 +848,6 @@ private fun HomeScreen(
             Text(status, color = Pal.Faint, fontSize = 11.sp)
         }
 
-        if (message.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Text(message, color = Pal.Teal, fontSize = 12.sp)
-        }
-
         if (rows.isNotEmpty()) {
             Spacer(Modifier.height(22.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -836,7 +858,8 @@ private fun HomeScreen(
             Spacer(Modifier.height(10.dp))
             PanelCard {
                 Column(Modifier.padding(14.dp)) {
-                    rows.take(50).forEach { row ->
+                    val visible = if (previewExpanded) rows.take(50) else rows.take(8)
+                    visible.forEach { row ->
                         Row(
                             Modifier.fillMaxWidth().padding(vertical = 5.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -854,27 +877,21 @@ private fun HomeScreen(
                             maxLines = 2, overflow = TextOverflow.Ellipsis
                         )
                     }
-                    if (rows.size > 50) {
+                    if (rows.size > 8) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            if (previewExpanded) I18n.t(lang, "preview_collapse")
+                            else I18n.f(lang, "preview_expand", rows.size),
+                            color = Pal.Teal, fontSize = 10.5.sp,
+                            modifier = Modifier.clickable { previewExpanded = !previewExpanded }
+                        )
+                    }
+                    if (previewExpanded && rows.size > 50) {
                         Spacer(Modifier.height(6.dp))
-                        Text(I18n.f(lang, "preview_limit", rows.size), color = Pal.Faint, fontSize = 10.sp)
-                    }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ExportButton("QBO", Modifier.weight(1f)) {
-                    export(context, engine, "qbo", rowsJson, baseName, lang, onMessage) {
-                        history = LocalStats.history(context)
-                    }
-                }
-                ExportButton("Excel", Modifier.weight(1f)) {
-                    export(context, engine, "xlsx", rowsJson, baseName, lang, onMessage) {
-                        history = LocalStats.history(context)
-                    }
-                }
-                ExportButton("CSV", Modifier.weight(1f)) {
-                    export(context, engine, "csv", rowsJson, baseName, lang, onMessage) {
-                        history = LocalStats.history(context)
+                        Text(
+                            I18n.f(lang, "preview_limit", rows.size),
+                            color = Pal.Faint, fontSize = 10.sp
+                        )
                     }
                 }
             }
@@ -885,7 +902,82 @@ private fun HomeScreen(
         Spacer(Modifier.height(10.dp))
         RecentCard(history, lang)
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(if (rows.isNotEmpty()) 108.dp else 24.dp))
+    }
+
+    if (rows.isNotEmpty()) {
+        Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Pal.Bg)))
+                .padding(horizontal = 24.dp, vertical = 14.dp)
+        ) {
+            GradientButton(
+                I18n.f(lang, "export_all", rows.size),
+                height = 50.dp,
+                radius = 15.dp
+            ) { showFormats = true }
+        }
+    }
+    }
+
+    if (showFormats) {
+        ModalBottomSheet(
+            onDismissRequest = { showFormats = false },
+            containerColor = Pal.Panel
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp)
+                    .navigationBarsPadding().padding(bottom = 20.dp)
+            ) {
+                Text(
+                    I18n.t(lang, "export_choose"), color = Pal.Text,
+                    fontSize = 17.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(pagesInfo, color = Pal.Faint, fontSize = 10.5.sp)
+                Spacer(Modifier.height(16.dp))
+                FormatOption("QBO", I18n.t(lang, "fmt_qbo_desc")) {
+                    showFormats = false
+                    export(context, engine, "qbo", rowsJson, baseName, lang, onNotify) {
+                        history = LocalStats.history(context)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                FormatOption("Excel", I18n.t(lang, "fmt_xlsx_desc")) {
+                    showFormats = false
+                    export(context, engine, "xlsx", rowsJson, baseName, lang, onNotify) {
+                        history = LocalStats.history(context)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                FormatOption("CSV", I18n.t(lang, "fmt_csv_desc")) {
+                    showFormats = false
+                    export(context, engine, "csv", rowsJson, baseName, lang, onNotify) {
+                        history = LocalStats.history(context)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FormatOption(title: String, desc: String, onPick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF0F151C))
+            .border(1.dp, Pal.Line, RoundedCornerShape(14.dp))
+            .clickable(onClick = onPick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Pal.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(3.dp))
+            Text(desc, color = Pal.Muted, fontSize = 10.5.sp)
+        }
+        Text("→", color = Pal.Teal, fontSize = 14.sp)
     }
 }
 
@@ -1014,7 +1106,7 @@ private fun export(
     rowsJson: String,
     baseName: String,
     lang: AppLang,
-    onMessage: (String) -> Unit,
+    notify: (String, (() -> Unit)?) -> Unit,
     onExported: () -> Unit
 ) {
     kotlinx.coroutines.MainScope().launch {
@@ -1026,27 +1118,15 @@ private fun export(
                 "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 else -> "text/csv"
             }
-            val (uri, path) = withContext(Dispatchers.IO) { Exporter.save(context, base64, fileName, mime) }
+            val (uri, _) = withContext(Dispatchers.IO) { Exporter.save(context, base64, fileName, mime) }
             LocalStats.markExported(context, baseName, kind)
             onExported()
-            onMessage(I18n.f(lang, "export_saved", path))
-            Exporter.share(context, uri, mime)
+            notify(I18n.f(lang, "export_saved", fileName)) {
+                Exporter.share(context, uri, mime)
+            }
         } catch (e: Throwable) {
-            onMessage(I18n.f(lang, "export_failed", e.message ?: "unknown"))
+            notify(I18n.f(lang, "export_failed", e.message ?: "unknown"), null)
         }
-    }
-}
-
-@Composable
-private fun ExportButton(label: String, modifier: Modifier, onClick: () -> Unit) {
-    Box(
-        modifier.height(42.dp).clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF1A1E23))
-            .border(1.dp, Pal.Line, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(label, color = Pal.Text, fontSize = 12.sp)
     }
 }
 
@@ -1057,10 +1137,11 @@ private fun ActivateScreen(
     context: Context,
     state: AppState,
     lang: AppLang,
-    message: String,
     onMessage: (String) -> Unit
 ) {
     var email by remember { mutableStateOf("") }
+    var emailError by remember { mutableStateOf(false) }
+    val emailFocus = remember { FocusRequester() }
     var cycle by remember { mutableStateOf("monthly") }
     var tier by remember { mutableStateOf(2) }
     var retrying by remember { mutableStateOf(false) }
@@ -1084,7 +1165,10 @@ private fun ActivateScreen(
             letterSpacing = 1.4.sp
         )
         Spacer(Modifier.height(8.dp))
-        EmailField(email, lang) { email = it }
+        EmailField(email, lang, emailError, emailFocus) {
+            email = it
+            emailError = false
+        }
 
         Spacer(Modifier.height(20.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1111,7 +1195,7 @@ private fun ActivateScreen(
         Spacer(Modifier.height(8.dp))
         GradientButton(I18n.t(lang, "cta_checkout")) {
             if (!Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
-                onMessage(I18n.t(lang, "error_email"))
+                emailError = true
                 return@GradientButton
             }
             val plan = PLANS.firstOrNull { it.code == "t${tier}_$cycle" } ?: return@GradientButton
@@ -1171,20 +1255,47 @@ private fun ActivateScreen(
             }
         }
 
-        if (message.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
-            Text(message, color = Pal.Teal, fontSize = 12.sp)
-        }
         Spacer(Modifier.height(24.dp))
+    }
+
+    if (emailError) {
+        AlertDialog(
+            onDismissRequest = { emailError = false },
+            containerColor = Pal.Panel,
+            titleContentColor = Pal.Text,
+            textContentColor = Pal.Muted,
+            title = {
+                Text(I18n.t(lang, "error_email"), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(I18n.t(lang, "email_dialog_body"), fontSize = 12.sp, lineHeight = 18.sp)
+            },
+            confirmButton = {
+                TextButton(onClick = { emailError = false }) {
+                    Text(I18n.t(lang, "update_ok"), color = Pal.Teal, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        )
     }
 }
 
 @Composable
-private fun EmailField(value: String, lang: AppLang, onChange: (String) -> Unit) {
+private fun EmailField(
+    value: String,
+    lang: AppLang,
+    error: Boolean,
+    focusRequester: FocusRequester,
+    onChange: (String) -> Unit
+) {
     val valid = Patterns.EMAIL_ADDRESS.matcher(value).matches()
+    LaunchedEffect(error) { if (error) focusRequester.requestFocus() }
     Row(
         Modifier.fillMaxWidth().height(50.dp).clip(RoundedCornerShape(14.dp))
-            .background(Pal.Panel).border(1.dp, Pal.Line2, RoundedCornerShape(14.dp))
+            .background(Pal.Panel).border(
+                if (error) 1.5.dp else 1.dp,
+                if (error) Pal.Danger else Pal.Line2,
+                RoundedCornerShape(14.dp)
+            )
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1198,7 +1309,7 @@ private fun EmailField(value: String, lang: AppLang, onChange: (String) -> Unit)
                 singleLine = true,
                 textStyle = TextStyle(color = Pal.Text, fontSize = 13.sp),
                 cursorBrush = SolidColor(Pal.Teal),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
             )
         }
         if (valid) {
@@ -1304,9 +1415,7 @@ private fun QuotaScreen(
     lang: AppLang,
     onRenew: () -> Unit,
     onCheckUpdate: () -> Unit,
-    checkNote: String,
-    message: String,
-    onMessage: (String) -> Unit
+    checkNote: String
 ) {
     val licence = state.licence
     val period = licence?.current()
@@ -1394,10 +1503,6 @@ private fun QuotaScreen(
             Text(checkNote, color = Pal.Teal, fontSize = 10.sp)
         }
 
-        if (message.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Text(message, color = Pal.Teal, fontSize = 12.sp)
-        }
         Spacer(Modifier.height(24.dp))
     }
 }

@@ -27,6 +27,42 @@ object Api {
         return post("/app-api.php?action=activate", payload)
     }
 
+    /** 试用额度台账（服务端权威，重装不重置）。 */
+    fun trialStatus(machine: String, appVersion: String): Result {
+        val payload = JSONObject()
+            .put("machine_id", machine)
+            .put("platform", "android")
+            .put("app_version", appVersion)
+        return post("/app-api.php?action=trial_status", payload)
+    }
+
+    fun trialConsume(machine: String, pages: Int, reqId: String, appVersion: String): Result {
+        val payload = JSONObject()
+            .put("machine_id", machine)
+            .put("platform", "android")
+            .put("pages", pages)
+            .put("req_id", reqId)
+            .put("app_version", appVersion)
+        return post("/app-api.php?action=trial_consume", payload)
+    }
+
+    fun trialRelease(machine: String, pages: Int, reqId: String): Result {
+        val payload = JSONObject()
+            .put("machine_id", machine)
+            .put("platform", "android")
+            .put("pages", pages)
+            .put("req_id", reqId)
+        return post("/app-api.php?action=trial_release", payload)
+    }
+
+    fun trialVoid(machine: String, order: String): Result {
+        val payload = JSONObject()
+            .put("machine_id", machine)
+            .put("platform", "android")
+            .put("order_ref", order)
+        return post("/app-api.php?action=trial_void", payload)
+    }
+
     private fun post(path: String, payload: JSONObject): Result {
         return try {
             val conn = (URL(BASE + path).openConnection() as HttpURLConnection).apply {

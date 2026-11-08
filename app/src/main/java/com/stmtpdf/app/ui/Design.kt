@@ -1,6 +1,7 @@
 package com.stmtpdf.app.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,11 +39,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.stmtpdf.app.R
 import com.stmtpdf.app.i18n.AppLang
 import com.stmtpdf.app.i18n.I18n
 
@@ -92,17 +95,11 @@ fun BrandRow(
     onLangPick: ((AppLang) -> Unit)? = null
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
-                .background(Pal.Tile).border(1.dp, Color(0xFF1E2A33), RoundedCornerShape(9.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("S", color = Pal.Teal, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            Box(
-                Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp)
-                    .size(5.dp).background(Pal.Warm, CircleShape)
-            )
-        }
+        Image(
+            painter = painterResource(R.drawable.logo_icon),
+            contentDescription = "StmtPDF",
+            modifier = Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
+        )
         Spacer(Modifier.size(8.dp))
         Text("StmtPDF", color = Pal.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.weight(1f))
