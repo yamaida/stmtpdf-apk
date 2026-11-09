@@ -108,7 +108,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -729,13 +728,20 @@ private fun HomeScreen(
     var parsing by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(0f) }
     var status by remember { mutableStateOf("") }
-    var rowsJson by remember { mutableStateOf("") }
-    var rows by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
-    var pagesInfo by remember { mutableStateOf("") }
-    var baseName by remember { mutableStateOf("statement") }
+    var docs by remember { mutableStateOf<List<ReviewDoc>>(emptyList()) }
+    var activeId by remember { mutableStateOf(0L) }
+    var nextId by remember { mutableStateOf(1L) }
+    var activeRow by remember { mutableStateOf<ReviewRow?>(null) }
+    var editingRow by remember { mutableStateOf<ReviewRow?>(null) }
+    var showPicker by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(LocalStats.history(context)) }
-    var previewExpanded by remember { mutableStateOf(false) }
     var showFormats by remember { mutableStateOf(false) }
+    var confirmExport by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var confirmExportCount by remember { mutableStateOf(0) }
+
+    val activeDoc = docs.firstOrNull { it.id == activeId }
+
+    fun docOf(row: ReviewRow): ReviewDoc? = docs.firstOrNull { doc -> doc.rows.any { it === row } }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -748,9 +754,6 @@ private fun HomeScreen(
         scope.launch {
             parsing = true
             progress = 0f
-            rows = emptyList()
-            rowsJson = ""
-            pagesInfo = ""
             status = I18n.t(lang, "parse_reading")
             try {
                 val dir = File(context.cacheDir, "pdf").apply { mkdirs() }
@@ -760,38 +763,44 @@ private fun HomeScreen(
                         file.outputStream().use { output -> input.copyTo(output) }
                     }
                 }
-                baseName = file.nameWithoutExtension
+                val displayName = displayNameOf(context, uri)
                 val json = engine.parse(file, capacity) { no, total ->
                     progress = (no.toFloat() / total).coerceIn(0f, 1f)
                     status = I18n.f(lang, "parse_progress", no, total)
                 }
-                val pages = json.optInt("pages", 0)
-                val total = json.optInt("totalPages", pages)
-                val arr = json.optJSONArray("rows") ?: JSONArray()
-                val list = mutableListOf<Map<String, Any?>>()
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    list.add(
-                        mapOf(
-                            "date" to o.optString("date"),
-                            "desc" to o.optString("desc"),
-                            "amount" to o.optDouble("amount", 0.0),
-                            "balance" to if (o.isNull("balance")) null else o.optDouble("balance", 0.0),
-                            "conf" to o.optInt("conf", 0)
-                        )
-                    )
-                }
-                rowsJson = arr.toString()
-                rows = list
-                pagesInfo = I18n.f(lang, "parse_summary", pages, total, list.size)
-                state.consume(pages)
-                LocalStats.addConversion(context, baseName, pages, list.size)
+                val id = nextId
+                nextId += 1
+                val doc = buildReviewDoc(json, id, displayName)
+                docs = docs + doc
+                activeId = doc.id
+                state.consume(doc.pages)
+                LocalStats.addConversion(context, doc.baseName, doc.pages, doc.rows.size)
                 history = LocalStats.history(context)
                 status = ""
             } catch (e: Throwable) {
                 status = I18n.f(lang, "parse_failed", e.message ?: "unknown")
             } finally {
                 parsing = false
+            }
+        }
+    }
+
+    /** 导出前拦截：仍有未核对的差异 / 低置信行时先二次确认。 */
+    val startExport: (String) -> Unit = { kind ->
+        val doc = activeDoc
+        if (doc != null) {
+            val json = doc.rowsJson()
+            showFormats = false
+            val proceed = {
+                export(context, engine, kind, json, doc.baseName, lang, onNotify) {
+                    history = LocalStats.history(context)
+                }
+            }
+            if (doc.pending > 0) {
+                confirmExportCount = doc.pending
+                confirmExport = proceed
+            } else {
+                proceed()
             }
         }
     }
@@ -848,53 +857,32 @@ private fun HomeScreen(
             Text(status, color = Pal.Faint, fontSize = 11.sp)
         }
 
-        if (rows.isNotEmpty()) {
+        val doc = activeDoc
+        if (doc != null) {
             Spacer(Modifier.height(22.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                SectionLabel(I18n.t(lang, "results"))
+                SectionLabel(
+                    I18n.f(lang, "review_title", doc.pages, doc.totalPages)
+                )
                 Spacer(Modifier.weight(1f))
-                Text(pagesInfo, color = Pal.Muted, fontSize = 10.sp)
+                Text(
+                    I18n.f(lang, "review_rows", doc.rows.size),
+                    color = Pal.Muted, fontSize = 10.sp
+                )
             }
             Spacer(Modifier.height(10.dp))
-            PanelCard {
-                Column(Modifier.padding(14.dp)) {
-                    val visible = if (previewExpanded) rows.take(50) else rows.take(8)
-                    visible.forEach { row ->
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(row["date"] as String, color = Pal.Muted, fontSize = 11.sp)
-                            Text(
-                                formatMoney(row["amount"] as Double),
-                                color = if ((row["amount"] as Double) < 0) Pal.Danger else Pal.Teal,
-                                fontSize = 12.sp
-                            )
-                        }
-                        Text(
-                            row["desc"] as String,
-                            color = Pal.Text, fontSize = 12.sp,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    if (rows.size > 8) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            if (previewExpanded) I18n.t(lang, "preview_collapse")
-                            else I18n.f(lang, "preview_expand", rows.size),
-                            color = Pal.Teal, fontSize = 10.5.sp,
-                            modifier = Modifier.clickable { previewExpanded = !previewExpanded }
-                        )
-                    }
-                    if (previewExpanded && rows.size > 50) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            I18n.f(lang, "preview_limit", rows.size),
-                            color = Pal.Faint, fontSize = 10.sp
-                        )
-                    }
-                }
-            }
+            FileSwitcher(
+                docs = docs,
+                activeId = doc.id,
+                lang = lang,
+                onSelect = {
+                    activeRow = null
+                    activeId = it
+                },
+                onOpenPicker = { showPicker = true }
+            )
+            Spacer(Modifier.height(10.dp))
+            ReviewList(doc, lang) { activeRow = it }
         }
 
         Spacer(Modifier.height(24.dp))
@@ -902,17 +890,19 @@ private fun HomeScreen(
         Spacer(Modifier.height(10.dp))
         RecentCard(history, lang)
 
-        Spacer(Modifier.height(if (rows.isNotEmpty()) 108.dp else 24.dp))
+        Spacer(Modifier.height(if (activeDoc != null) 150.dp else 24.dp))
     }
 
-    if (rows.isNotEmpty()) {
+    if (activeDoc != null) {
         Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Transparent, Pal.Bg)))
                 .padding(horizontal = 24.dp, vertical = 14.dp)
         ) {
+            ReviewStats(activeDoc, lang)
+            Spacer(Modifier.height(10.dp))
             GradientButton(
-                I18n.f(lang, "export_all", rows.size),
+                I18n.f(lang, "export_all", activeDoc.rows.size),
                 height = 50.dp,
                 radius = 15.dp
             ) { showFormats = true }
@@ -920,7 +910,8 @@ private fun HomeScreen(
     }
     }
 
-    if (showFormats) {
+    val exportDoc = activeDoc
+    if (showFormats && exportDoc != null) {
         ModalBottomSheet(
             onDismissRequest = { showFormats = false },
             containerColor = Pal.Panel
@@ -934,30 +925,120 @@ private fun HomeScreen(
                     fontSize = 17.sp, fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(4.dp))
-                Text(pagesInfo, color = Pal.Faint, fontSize = 10.5.sp)
+                Text(
+                    I18n.f(lang, "parse_summary", exportDoc.pages, exportDoc.totalPages, exportDoc.rows.size),
+                    color = Pal.Faint, fontSize = 10.5.sp
+                )
                 Spacer(Modifier.height(16.dp))
-                FormatOption("QBO", I18n.t(lang, "fmt_qbo_desc")) {
-                    showFormats = false
-                    export(context, engine, "qbo", rowsJson, baseName, lang, onNotify) {
-                        history = LocalStats.history(context)
-                    }
-                }
+                FormatOption("QBO", I18n.t(lang, "fmt_qbo_desc")) { startExport("qbo") }
                 Spacer(Modifier.height(8.dp))
-                FormatOption("Excel", I18n.t(lang, "fmt_xlsx_desc")) {
-                    showFormats = false
-                    export(context, engine, "xlsx", rowsJson, baseName, lang, onNotify) {
-                        history = LocalStats.history(context)
-                    }
-                }
+                FormatOption("Excel", I18n.t(lang, "fmt_xlsx_desc")) { startExport("xlsx") }
                 Spacer(Modifier.height(8.dp))
-                FormatOption("CSV", I18n.t(lang, "fmt_csv_desc")) {
-                    showFormats = false
-                    export(context, engine, "csv", rowsJson, baseName, lang, onNotify) {
-                        history = LocalStats.history(context)
-                    }
-                }
+                FormatOption("CSV", I18n.t(lang, "fmt_csv_desc")) { startExport("csv") }
             }
         }
+    }
+
+    if (showPicker) {
+        FilePickerSheet(
+            docs = docs,
+            activeId = activeId,
+            lang = lang,
+            onPick = {
+                showPicker = false
+                activeRow = null
+                activeId = it
+            },
+            onDismiss = { showPicker = false }
+        )
+    }
+
+    val sheetRow = activeRow
+    val sheetDoc = sheetRow?.let { docOf(it) }
+    if (sheetDoc != null && sheetRow != null) {
+        val index = sheetDoc.rows.indexOfFirst { it === sheetRow }
+        ReviewSheet(
+            doc = sheetDoc,
+            row = sheetRow,
+            lang = lang,
+            canGoPrev = index > 0,
+            hasOtherDocs = docs.size > 1,
+            onDismiss = { activeRow = null },
+            onPrev = { if (index > 0) activeRow = sheetDoc.rows[index - 1] },
+            onEdit = { editingRow = sheetRow },
+            onVerify = { sheetRow.verified = true },
+            onNextFile = {
+                val current = docs.indexOfFirst { it.id == sheetDoc.id }
+                val next = docs.getOrNull((current + 1) % docs.size)
+                if (next != null) {
+                    activeId = next.id
+                    activeRow = next.rows.firstOrNull { it.hasIssue && !it.verified }
+                        ?: next.rows.firstOrNull { !it.verified }
+                        ?: next.rows.firstOrNull()
+                }
+            }
+        )
+    }
+
+    val editRow = editingRow
+    if (editRow != null) {
+        ReviewEditDialog(
+            row = editRow,
+            lang = lang,
+            onDismiss = { editingRow = null },
+            onSave = { date, desc, amountText, balanceText ->
+                val amount = amountText.replace(",", "").toDoubleOrNull() ?: editRow.amount
+                val balance = if (balanceText.isBlank()) {
+                    null
+                } else {
+                    balanceText.replace(",", "").toDoubleOrNull()
+                }
+                editRow.date = date
+                editRow.desc = desc
+                editRow.amount = amount
+                editRow.balance = balance
+                docOf(editRow)?.let { recomputeIssues(it) }
+                editingRow = null
+            }
+        )
+    }
+
+    val pendingExport = confirmExport
+    if (pendingExport != null) {
+        AlertDialog(
+            onDismissRequest = { confirmExport = null },
+            containerColor = Pal.Panel,
+            titleContentColor = Pal.Text,
+            textContentColor = Pal.Muted,
+            title = {
+                Text(
+                    I18n.t(lang, "export_confirm_title"),
+                    fontSize = 16.sp, fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    I18n.f(lang, "export_confirm_body", confirmExportCount),
+                    fontSize = 12.sp, lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmExport = null
+                    pendingExport()
+                }) {
+                    Text(
+                        I18n.t(lang, "export_continue"), color = Pal.Teal,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmExport = null }) {
+                    Text(I18n.t(lang, "cancel"), color = Pal.Muted)
+                }
+            }
+        )
     }
 }
 
@@ -1092,11 +1173,6 @@ private fun HistoryRow(item: HistoryItem, warm: Boolean, lang: AppLang) {
         Spacer(Modifier.width(8.dp))
         InfoChip(item.format, accent)
     }
-}
-
-private fun formatMoney(v: Double): String {
-    val sign = if (v < 0) "-" else ""
-    return sign + "$" + String.format(Locale.US, "%.2f", kotlin.math.abs(v))
 }
 
 private fun export(

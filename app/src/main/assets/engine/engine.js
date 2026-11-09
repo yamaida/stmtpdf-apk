@@ -4,7 +4,9 @@
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/assets/web/pdfjs/pdf.worker.min.js';
   }
 
-  function appendPageLines(target, items) {
+  function round2(v) { return Math.round(v * 100) / 100; }
+
+  function appendPageLines(target, items, pageNo) {
     var buckets = [];
     items.forEach(function (item) {
       if (!item || !item.str || !item.str.trim()) return;
@@ -15,14 +17,32 @@
         if (Math.abs(buckets[i].y - y) <= 2) { bucket = buckets[i]; break; }
       }
       if (!bucket) { bucket = { y: y, items: [] }; buckets.push(bucket); }
-      bucket.items.push({ x: item.transform[4], text: item.str });
+      bucket.items.push({
+        x: item.transform[4], y: item.transform[5],
+        w: typeof item.width === 'number' ? item.width : 0,
+        h: typeof item.height === 'number' ? item.height : 0,
+        text: item.str
+      });
     });
     buckets.sort(function (a, b) { return b.y - a.y; });
     buckets.forEach(function (bucket) {
       bucket.items.sort(function (a, b) { return a.x - b.x; });
       var line = bucket.items.map(function (e) { return e.text; }).join(' ')
         .replace(/\s+/g, ' ').trim();
-      if (line) target.push(line);
+      if (!line) return;
+      var x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      bucket.items.forEach(function (e) {
+        var h = e.h || 0;
+        x0 = Math.min(x0, e.x);
+        x1 = Math.max(x1, e.x + (e.w || 0));
+        y0 = Math.min(y0, e.y - h * 0.25);
+        y1 = Math.max(y1, e.y + h);
+      });
+      var bbox = null;
+      if (isFinite(x0) && isFinite(x1) && isFinite(y0) && isFinite(y1) && x1 > x0) {
+        bbox = [round2(x0), round2(y0), round2(x1), round2(y1)];
+      }
+      target.push({ text: line, page: pageNo, bbox: bbox });
     });
   }
 
@@ -58,19 +78,30 @@
         .then(function (doc) {
           var pages = Math.min(doc.numPages, Math.max(1, maxPages | 0));
           var lines = [];
+          var pageLines = [];
           function step(no) {
             if (no > pages) return Promise.resolve();
             return doc.getPage(no).then(function (page) {
               return page.getTextContent();
             }).then(function (content) {
-              appendPageLines(lines, content.items);
+              var current = [];
+              appendPageLines(current, content.items, no);
+              if (current.length) {
+                pageLines.push(current.map(function (entry) { return entry.text; }));
+              } else {
+                pageLines.push([]);
+              }
+              lines = lines.concat(current);
               try { AndroidBridge.onProgress(no, pages); } catch (e) { /* ignore */ }
               return step(no + 1);
             });
           }
           return step(1).then(function () {
             var rows = window.StmtPdfCore.parseStatementLines(lines);
-            var result = { pages: pages, totalPages: doc.numPages, rows: rows };
+            var result = {
+              pages: pages, totalPages: doc.numPages,
+              rows: rows, pageLines: pageLines
+            };
             try { doc.destroy(); } catch (e) { /* ignore */ }
             AndroidBridge.onResult(JSON.stringify(result));
           });

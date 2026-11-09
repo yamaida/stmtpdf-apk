@@ -26,6 +26,20 @@ var MONEY_RE = /(?:[$€£]\s*)?\(?-?\d+(?:[.,]\d{3})*(?:[.,]\d{2})\)?(?:\s*[$�
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
+/* 行输入既支持纯文本，也支持引擎给出的 { text, page, bbox }。 */
+function normalizeLines(lines) {
+  return (lines || []).map(function (item) {
+    if (typeof item === 'string') { return { text: item, page: null, bbox: null }; }
+    var page = item && item.page ? Number(item.page) : null;
+    var bbox = item && item.bbox && item.bbox.length === 4 ? item.bbox : null;
+    return {
+      text: String((item && item.text) || ''),
+      page: page !== null && !isNaN(page) ? page : null,
+      bbox: bbox
+    };
+  });
+}
+
 function monthFromName(name) {
   var key = String(name || '').toLowerCase().replace(/\./g, '').trim();
   return MONTHS[key] || MONTHS[key.slice(0, 4)] || MONTHS[key.slice(0, 3)] || 0;
@@ -162,40 +176,42 @@ function scoreRow(row, previous, moneyCount, strictDate) {
 }
 
 function parseStatementLines(lines) {
+  var entries = normalizeLines(lines);
   var yearHint = null;
-  for (var i = 0; i < lines.length; i++) {
-    var probe = DATE_ANY_RE.exec(lines[i]);
+  for (var i = 0; i < entries.length; i++) {
+    var probe = DATE_ANY_RE.exec(entries[i].text);
     if (probe && probe[1]) { yearHint = Number(probe[1]); break; }
   }
   if (!yearHint) {
-    for (var j = 0; j < lines.length; j++) {
-      var y = lines[j].match(/\b(20\d{2})\b/);
+    for (var j = 0; j < entries.length; j++) {
+      var y = entries[j].text.match(/\b(20\d{2})\b/);
       if (y) { yearHint = Number(y[1]); break; }
     }
   }
   if (!yearHint) { yearHint = new Date().getFullYear(); }
 
   // 先按「日期在行首」的严格版式解析；识别不到或只识别到极少数行时，放宽到「日期出现在行内任意位置」
-  var rows = collectRows(lines, yearHint, false);
-  if (!rows.length) { return collectRows(lines, yearHint, true); }
+  var rows = collectRows(entries, yearHint, false);
+  if (!rows.length) { return collectRows(entries, yearHint, true); }
   if (rows.length < 3) {
-    var looseRows = collectRows(lines, yearHint, true);
+    var looseRows = collectRows(entries, yearHint, true);
     if (looseRows.length > rows.length) { return looseRows; }
   }
   return rows;
 }
 
-function collectRows(lines, yearHint, loose) {
+function collectRows(entries, yearHint, loose) {
   var rows = [];
   var previous = null;
-  lines.forEach(function (line) {
-    var parsed = parseLine(line, yearHint, loose);
+  entries.forEach(function (entry) {
+    var parsed = parseLine(entry.text, yearHint, loose);
     if (!parsed) { return; }
     var conf = scoreRow(parsed, previous, parsed.moneyCount, parsed.strictDate);
     if (loose) { conf = Math.max(0, conf - 10); }
     var row = {
       date: parsed.date, desc: parsed.desc,
-      amount: parsed.amount, balance: parsed.balance, conf: conf
+      amount: parsed.amount, balance: parsed.balance, conf: conf,
+      page: entry.page, bbox: entry.bbox, raw_text: entry.text
     };
     rows.push(row);
     previous = row;
