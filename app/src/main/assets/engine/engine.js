@@ -6,7 +6,7 @@
 
   function round2(v) { return Math.round(v * 100) / 100; }
 
-  function appendPageLines(target, items, pageNo) {
+  function appendPageLines(target, items, pageNo, pageWidth) {
     var buckets = [];
     items.forEach(function (item) {
       if (!item || !item.str || !item.str.trim()) return;
@@ -17,11 +17,10 @@
         if (Math.abs(buckets[i].y - y) <= 2) { bucket = buckets[i]; break; }
       }
       if (!bucket) { bucket = { y: y, items: [] }; buckets.push(bucket); }
+      var h = Number(item.height) || Math.abs(Number(item.transform[3])) || 10;
+      var w = Number(item.width) || (String(item.str).length * h * 0.5);
       bucket.items.push({
-        x: item.transform[4], y: item.transform[5],
-        w: typeof item.width === 'number' ? item.width : 0,
-        h: typeof item.height === 'number' ? item.height : 0,
-        text: item.str
+        x: item.transform[4], y: item.transform[5], w: w, h: h, text: item.str
       });
     });
     buckets.sort(function (a, b) { return b.y - a.y; });
@@ -42,7 +41,15 @@
       if (isFinite(x0) && isFinite(x1) && isFinite(y0) && isFinite(y1) && x1 > x0) {
         bbox = [round2(x0), round2(y0), round2(x1), round2(y1)];
       }
-      target.push({ text: line, page: pageNo, bbox: bbox });
+      target.push({
+        text: line,
+        page: pageNo,
+        bbox: bbox,
+        width: pageWidth || null,
+        words: bucket.items.map(function (entry) {
+          return { x: entry.x, y: entry.y, w: entry.w, h: entry.h, text: entry.text };
+        })
+      });
     });
   }
 
@@ -82,18 +89,20 @@
           function step(no) {
             if (no > pages) return Promise.resolve();
             return doc.getPage(no).then(function (page) {
-              return page.getTextContent();
-            }).then(function (content) {
-              var current = [];
-              appendPageLines(current, content.items, no);
-              if (current.length) {
-                pageLines.push(current.map(function (entry) { return entry.text; }));
-              } else {
-                pageLines.push([]);
-              }
-              lines = lines.concat(current);
-              try { AndroidBridge.onProgress(no, pages); } catch (e) { /* ignore */ }
-              return step(no + 1);
+              var width = (page.view && page.view.length >= 4)
+                ? Number(page.view[2]) - Number(page.view[0]) : 0;
+              return page.getTextContent().then(function (content) {
+                var current = [];
+                appendPageLines(current, content.items, no, width);
+                if (current.length) {
+                  pageLines.push(current.map(function (entry) { return entry.text; }));
+                } else {
+                  pageLines.push([]);
+                }
+                lines = lines.concat(current);
+                try { AndroidBridge.onProgress(no, pages); } catch (e) { /* ignore */ }
+                return step(no + 1);
+              });
             });
           }
           return step(1).then(function () {
