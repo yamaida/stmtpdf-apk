@@ -13,7 +13,8 @@ data class HistoryItem(
     val pages: Int,
     val rows: Int,
     val format: String,
-    val at: Long
+    val at: Long,
+    val id: Long = 0L
 )
 
 /**
@@ -37,7 +38,8 @@ object LocalStats {
                     pages = o.optInt("pages"),
                     rows = o.optInt("rows"),
                     format = o.optString("format", "PDF"),
-                    at = o.optLong("at")
+                    at = o.optLong("at"),
+                    id = o.optLong("id")
                 )
             }
         } catch (e: Throwable) {
@@ -46,12 +48,12 @@ object LocalStats {
     }
 
     /** 解析成功后写入最近记录（同名文件去重后置顶）。 */
-    fun addConversion(context: Context, name: String, pages: Int, rows: Int) {
+    fun addConversion(context: Context, name: String, pages: Int, rows: Int, id: Long = 0L) {
         if (name.isBlank()) return
         val list = history(context).filterNot { it.name == name }.toMutableList()
         list.add(
             0,
-            HistoryItem(name, pages, rows, "PDF", System.currentTimeMillis())
+            HistoryItem(name, pages, rows, "PDF", System.currentTimeMillis(), id)
         )
         saveHistory(context, list.take(HISTORY_LIMIT))
     }
@@ -67,6 +69,11 @@ object LocalStats {
         }
         val updated = list.map { if (it.name == name) it.copy(format = format) else it }
         saveHistory(context, updated)
+    }
+
+    /** 清除全部最近记录（落盘文件由 StatementStore 负责删除）。 */
+    fun clearHistory(context: Context) {
+        prefs(context).edit().remove(KEY_HISTORY).apply()
     }
 
     /** 记录当月消耗页数。 */
@@ -106,6 +113,7 @@ object LocalStats {
             arr.put(
                 JSONObject().put("name", it.name).put("pages", it.pages)
                     .put("rows", it.rows).put("format", it.format).put("at", it.at)
+                    .put("id", it.id)
             )
         }
         prefs(context).edit().putString(KEY_HISTORY, arr.toString()).apply()

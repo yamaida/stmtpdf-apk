@@ -97,6 +97,7 @@ import com.stmtpdf.app.licensing.TrialLedger
 import com.stmtpdf.app.net.Api
 import com.stmtpdf.app.storage.HistoryItem
 import com.stmtpdf.app.storage.LocalStats
+import com.stmtpdf.app.storage.StatementStore
 import com.stmtpdf.app.update.UpdateChecker
 import com.stmtpdf.app.update.UpdateCheckResult
 import com.stmtpdf.app.update.UpdateDownloadService
@@ -194,6 +195,7 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
     val context = LocalContext.current
     val state = remember { AppState(context) }
     var tab by remember { mutableStateOf(0) }
+    var compareOpen by remember { mutableStateOf(false) }
     var lang by remember { mutableStateOf(LocaleStore.load(context)) }
     val snackbarHostState = remember { SnackbarHostState() }
     var showSplash by remember { mutableStateOf(true) }
@@ -385,7 +387,7 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
                     )
                 }
             },
-            bottomBar = { PillTabBar(tab, lang) { tab = it } }
+            bottomBar = { if (!compareOpen) PillTabBar(tab, lang) { tab = it } }
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (tab) {
@@ -396,6 +398,7 @@ fun AppRoot(engine: PdfEngine, initialUri: Uri?) {
                             LocaleStore.save(context, it)
                         },
                         onNeedActivate = { tab = 1 },
+                        onFullscreen = { compareOpen = it },
                         onNotify = { text, action -> notify(text, action) }
                     )
                     1 -> ActivateScreen(
@@ -721,6 +724,7 @@ private fun HomeScreen(
     lang: AppLang,
     onLangPick: (AppLang) -> Unit,
     onNeedActivate: () -> Unit,
+    onFullscreen: (Boolean) -> Unit,
     onNotify: (String, (() -> Unit)?) -> Unit
 ) {
     val context = LocalContext.current
@@ -730,7 +734,7 @@ private fun HomeScreen(
     var status by remember { mutableStateOf("") }
     var docs by remember { mutableStateOf<List<ReviewDoc>>(emptyList()) }
     var activeId by remember { mutableStateOf(0L) }
-    var nextId by remember { mutableStateOf(1L) }
+    var compareId by remember { mutableStateOf<Long?>(null) }
     var activeRow by remember { mutableStateOf<ReviewRow?>(null) }
     var editingRow by remember { mutableStateOf<ReviewRow?>(null) }
     var showPicker by remember { mutableStateOf(false) }
@@ -738,8 +742,13 @@ private fun HomeScreen(
     var showFormats by remember { mutableStateOf(false) }
     var confirmExport by remember { mutableStateOf<(() -> Unit)?>(null) }
     var confirmExportCount by remember { mutableStateOf(0) }
+    var quotaBlocked by remember { mutableStateOf(false) }
 
     val activeDoc = docs.firstOrNull { it.id == activeId }
+    val compareDoc = compareId?.let { id -> docs.firstOrNull { it.id == id } }
+
+    // 对比页全屏展示时隐藏底部页签，退出首页时复位
+    DisposableEffect(Unit) { onDispose { onFullscreen(false) } }
 
     fun docOf(row: ReviewRow): ReviewDoc? = docs.firstOrNull { doc -> doc.rows.any { it === row } }
 
@@ -768,15 +777,18 @@ private fun HomeScreen(
                     progress = (no.toFloat() / total).coerceIn(0f, 1f)
                     status = I18n.f(lang, "parse_progress", no, total)
                 }
-                val id = nextId
-                nextId += 1
-                val doc = buildReviewDoc(json, id, displayName)
+                val id = System.currentTimeMillis()
+                val pdfPath = withContext(Dispatchers.IO) {
+                    StatementStore.save(context, id, displayName, file, json)
+                }
+                val doc = buildReviewDoc(json, id, displayName, pdfPath)
                 docs = docs + doc
                 activeId = doc.id
-                state.consume(doc.pages)
-                LocalStats.addConversion(context, doc.baseName, doc.pages, doc.rows.size)
+                LocalStats.addConversion(context, doc.baseName, doc.pages, doc.rows.size, id)
                 history = LocalStats.history(context)
                 status = ""
+                compareId = doc.id
+                onFullscreen(true)
             } catch (e: Throwable) {
                 status = I18n.f(lang, "parse_failed", e.message ?: "unknown")
             } finally {
@@ -792,7 +804,10 @@ private fun HomeScreen(
             val json = doc.rowsJson()
             showFormats = false
             val proceed = {
-                export(context, engine, kind, json, doc.baseName, lang, onNotify) {
+                export(
+                    context, engine, state, doc.pages, kind, json, doc.baseName, lang, onNotify,
+                    onQuotaBlocked = { quotaBlocked = true }
+                ) {
                     history = LocalStats.history(context)
                 }
             }
@@ -886,9 +901,55 @@ private fun HomeScreen(
         }
 
         Spacer(Modifier.height(24.dp))
-        SectionLabel(I18n.t(lang, "recent"))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel(I18n.t(lang, "recent"))
+            Spacer(Modifier.weight(1f))
+            if (history.isNotEmpty()) {
+                Text(
+                    I18n.t(lang, "clear_history"),
+                    color = Pal.Faint, fontSize = 9.5.sp, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clip(RoundedCornerShape(50))
+                        .clickable {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { StatementStore.clear(context) }
+                                LocalStats.clearHistory(context)
+                                history = LocalStats.history(context)
+                                docs = emptyList()
+                                activeId = 0L
+                                compareId = null
+                                onFullscreen(false)
+                            }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
         Spacer(Modifier.height(10.dp))
-        RecentCard(history, lang)
+        RecentCard(history, lang, onOpen = { item ->
+            if (item.id <= 0L) {
+                onNotify(I18n.t(lang, "record_gone"), null)
+            } else {
+                val existing = docs.firstOrNull { it.id == item.id }
+                if (existing != null) {
+                    activeId = item.id
+                    compareId = item.id
+                    onFullscreen(true)
+                } else {
+                    scope.launch {
+                        val record = withContext(Dispatchers.IO) { StatementStore.load(context, item.id) }
+                        if (record == null) {
+                            onNotify(I18n.t(lang, "record_gone"), null)
+                        } else {
+                            val doc = buildReviewDoc(record.json, item.id, record.name, record.pdfPath)
+                            docs = docs + doc
+                            activeId = doc.id
+                            compareId = doc.id
+                            onFullscreen(true)
+                        }
+                    }
+                }
+            }
+        })
 
         Spacer(Modifier.height(if (activeDoc != null) 150.dp else 24.dp))
     }
@@ -907,6 +968,25 @@ private fun HomeScreen(
                 radius = 15.dp
             ) { showFormats = true }
         }
+    }
+
+    val fullDoc = compareDoc
+    if (fullDoc != null) {
+        CompareScreen(
+            docs = docs,
+            activeId = fullDoc.id,
+            lang = lang,
+            onSelect = {
+                activeId = it
+                compareId = it
+                activeRow = null
+            },
+            onClose = {
+                compareId = null
+                onFullscreen(false)
+            },
+            onExport = { showFormats = true }
+        )
     }
     }
 
@@ -1040,6 +1120,37 @@ private fun HomeScreen(
             }
         )
     }
+
+    if (quotaBlocked) {
+        AlertDialog(
+            onDismissRequest = { quotaBlocked = false },
+            containerColor = Pal.Panel,
+            titleContentColor = Pal.Text,
+            textContentColor = Pal.Muted,
+            title = {
+                Text(
+                    I18n.t(lang, "quota_empty_title"),
+                    fontSize = 16.sp, fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(I18n.t(lang, "quota_empty"), fontSize = 12.sp, lineHeight = 18.sp)
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    quotaBlocked = false
+                    onNeedActivate()
+                }) {
+                    Text(I18n.t(lang, "view_plans"), color = Pal.Teal, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { quotaBlocked = false }) {
+                    Text(I18n.t(lang, "cancel"), color = Pal.Muted)
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1119,7 +1230,7 @@ private fun UploadCard(
 }
 
 @Composable
-private fun RecentCard(history: List<HistoryItem>, lang: AppLang) {
+private fun RecentCard(history: List<HistoryItem>, lang: AppLang, onOpen: (HistoryItem) -> Unit) {
     PanelCard {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
             if (history.isEmpty()) {
@@ -1133,7 +1244,7 @@ private fun RecentCard(history: List<HistoryItem>, lang: AppLang) {
                     if (index > 0) {
                         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF16222A)))
                     }
-                    HistoryRow(item, index % 2 == 1, lang)
+                    HistoryRow(item, index % 2 == 1, lang) { onOpen(item) }
                 }
             }
         }
@@ -1141,10 +1252,13 @@ private fun RecentCard(history: List<HistoryItem>, lang: AppLang) {
 }
 
 @Composable
-private fun HistoryRow(item: HistoryItem, warm: Boolean, lang: AppLang) {
+private fun HistoryRow(item: HistoryItem, warm: Boolean, lang: AppLang, onClick: () -> Unit) {
     val accent = if (warm) Pal.Warm else Pal.Teal
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 11.dp),
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
@@ -1175,18 +1289,29 @@ private fun HistoryRow(item: HistoryItem, warm: Boolean, lang: AppLang) {
     }
 }
 
+/**
+ * 导出并扣页：解析不再扣页，每次导出动作在写文件前扣一次；
+ * 额度不足时不导出，交由调用方弹出拦截提示。
+ */
 private fun export(
     context: Context,
     engine: PdfEngine,
+    state: AppState,
+    pages: Int,
     kind: String,
     rowsJson: String,
     baseName: String,
     lang: AppLang,
     notify: (String, (() -> Unit)?) -> Unit,
+    onQuotaBlocked: () -> Unit,
     onExported: () -> Unit
 ) {
     kotlinx.coroutines.MainScope().launch {
         try {
+            if (state.capacity() < pages) {
+                onQuotaBlocked()
+                return@launch
+            }
             val base64 = withContext(Dispatchers.Default) { engine.export(kind, rowsJson, baseName) }
             val fileName = baseName + "." + kind
             val mime = when (kind) {
@@ -1194,6 +1319,11 @@ private fun export(
                 "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 else -> "text/csv"
             }
+            if (state.capacity() < pages) {
+                onQuotaBlocked()
+                return@launch
+            }
+            state.consume(pages)
             val (uri, _) = withContext(Dispatchers.IO) { Exporter.save(context, base64, fileName, mime) }
             LocalStats.markExported(context, baseName, kind)
             onExported()

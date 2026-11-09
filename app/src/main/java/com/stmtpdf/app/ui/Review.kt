@@ -96,7 +96,8 @@ class ReviewDoc(
     val pages: Int,
     val totalPages: Int,
     val pageLines: List<List<String>>,
-    val rows: List<ReviewRow>
+    val rows: List<ReviewRow>,
+    val pdfPath: String = ""
 ) {
     val pending: Int get() = rows.count { it.issue != null && !it.verified }
     val unverified: Int get() = rows.count { !it.verified }
@@ -134,7 +135,12 @@ internal fun recomputeIssues(doc: ReviewDoc) {
 }
 
 /** 由 WebView 返回的 JSON 构建可校对文件；缺失 page/bbox 时自动降级。 */
-internal fun buildReviewDoc(json: JSONObject, id: Long, displayName: String): ReviewDoc {
+internal fun buildReviewDoc(
+    json: JSONObject,
+    id: Long,
+    displayName: String,
+    pdfPath: String = ""
+): ReviewDoc {
     val pages = json.optInt("pages", 0)
     val totalPages = json.optInt("totalPages", pages)
     val arr = json.optJSONArray("rows") ?: JSONArray()
@@ -178,7 +184,8 @@ internal fun buildReviewDoc(json: JSONObject, id: Long, displayName: String): Re
         pages = pages,
         totalPages = totalPages,
         pageLines = pageLines,
-        rows = rows
+        rows = rows,
+        pdfPath = pdfPath
     )
     recomputeIssues(doc)
     return doc
@@ -333,7 +340,7 @@ internal fun ReviewList(doc: ReviewDoc, lang: AppLang, onRowClick: (ReviewRow) -
 }
 
 @Composable
-private fun ReviewRowItem(row: ReviewRow, lang: AppLang, onClick: () -> Unit) {
+internal fun ReviewRowItem(row: ReviewRow, lang: AppLang, onClick: () -> Unit = {}) {
     val accent = when {
         row.verified -> Pal.Teal
         row.issue == ISSUE_DIFF -> Pal.Danger
