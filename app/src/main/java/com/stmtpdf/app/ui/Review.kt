@@ -72,6 +72,7 @@ class ReviewRow(
     val rawText: String,
     val bbox: List<Double>?,
     val conf: Int,
+    val account: String,
     date: String,
     desc: String,
     amount: Double,
@@ -113,6 +114,8 @@ class ReviewDoc(
 internal fun recomputeIssues(doc: ReviewDoc) {
     var previous: ReviewRow? = null
     doc.rows.forEach { row ->
+        // 进入新账户段时不跨账户勾稽余额，避免多账户账单误报差异。
+        if (previous != null && previous!!.account != row.account) { previous = null }
         val balance = row.balance
         val prev = previous
         var diff = false
@@ -151,6 +154,7 @@ internal fun buildReviewDoc(json: JSONObject, id: Long, displayName: String): Re
                 rawText = o.optString("raw_text"),
                 bbox = bbox,
                 conf = o.optInt("conf", 0),
+                account = o.optString("account"),
                 date = o.optString("date"),
                 desc = o.optString("desc"),
                 amount = o.optDouble("amount", 0.0),
@@ -191,6 +195,7 @@ internal fun ReviewDoc.rowsJson(): String {
                 put("amount", row.amount)
                 put("balance", row.balance ?: JSONObject.NULL)
                 put("conf", row.conf)
+                put("account", row.account)
             }
         )
     }

@@ -135,7 +135,8 @@
               Description: r.desc,
               Amount: Number(r.amount),
               Balance: r.balance === null || r.balance === undefined ? '' : Number(r.balance),
-              Confidence: r.conf + '%'
+              Confidence: r.conf + '%',
+              Account: r.account || ''
             };
           });
           var ws = window.XLSX.utils.json_to_sheet(data);
