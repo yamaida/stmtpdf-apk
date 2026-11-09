@@ -13,6 +13,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -45,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -134,8 +136,10 @@ internal fun CompareScreen(
 ) {
     val doc = docs.firstOrNull { it.id == activeId } ?: return
     var pageIndex by remember(doc.id) { mutableStateOf(0) }
-    var split by remember { mutableStateOf(0.5f) }
+    var split by remember { mutableStateOf(0.58f) }
     var showAll by remember { mutableStateOf(false) }
+    var selIndex by remember(doc.id) { mutableStateOf(-1) }
+    var editing by remember { mutableStateOf<ReviewRow?>(null) }
     val pageCount = maxOf(doc.totalPages, doc.pages, 1)
     val currentPage = pageIndex.coerceIn(0, pageCount - 1)
     val density = LocalDensity.current
@@ -158,6 +162,20 @@ internal fun CompareScreen(
                         .border(1.dp, Pal.Line, RoundedCornerShape(16.dp))
                 ) {
                     PdfPageView(doc.pdfPath, currentPage, lang, Modifier.fillMaxSize())
+                    if (selIndex >= 0) {
+                        Box(
+                            Modifier.align(Alignment.TopStart).padding(10.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Pal.Teal.copy(alpha = 0.18f))
+                                .border(1.dp, Pal.Teal.copy(alpha = 0.65f), RoundedCornerShape(50))
+                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                "#${selIndex + 1}", color = Pal.Teal,
+                                fontSize = 9.sp, fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                     if (pageCount > 1) {
                         PageBar(
                             page = currentPage,
@@ -174,7 +192,23 @@ internal fun CompareScreen(
                 }
 
                 RowsPanel(
-                    doc, lang,
+                    doc, lang, selIndex,
+                    onSelect = { index ->
+                        selIndex = index
+                        doc.rows.getOrNull(index)?.page?.let { page ->
+                            pageIndex = (page - 1).coerceIn(0, pageCount - 1)
+                        }
+                    },
+                    onEdit = { index ->
+                        selIndex = index
+                        editing = doc.rows.getOrNull(index)
+                    },
+                    onToggle = { index ->
+                        doc.rows.getOrNull(index)?.let { row ->
+                            row.verified = !row.verified
+                            recomputeIssues(doc)
+                        }
+                    },
                     Modifier.weight(1f).padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
                 )
             }
@@ -191,6 +225,23 @@ internal fun CompareScreen(
                 onSelect(it)
             },
             onDismiss = { showAll = false }
+        )
+    }
+
+    editing?.let { row ->
+        ReviewEditDialog(
+            row = row,
+            lang = lang,
+            onDismiss = { editing = null },
+            onSave = { date, desc, amount, balance ->
+                row.date = date
+                row.desc = desc
+                amount.replace(",", "").toDoubleOrNull()?.let { row.amount = it }
+                row.balance = balance.replace(",", "").toDoubleOrNull()
+                row.verified = true
+                recomputeIssues(doc)
+                editing = null
+            }
         )
     }
 }
@@ -335,7 +386,15 @@ private fun PageBar(
 }
 
 @Composable
-private fun RowsPanel(doc: ReviewDoc, lang: AppLang, modifier: Modifier) {
+private fun RowsPanel(
+    doc: ReviewDoc,
+    lang: AppLang,
+    selIndex: Int,
+    onSelect: (Int) -> Unit,
+    onEdit: (Int) -> Unit,
+    onToggle: (Int) -> Unit,
+    modifier: Modifier
+) {
     Column(
         modifier.clip(RoundedCornerShape(16.dp)).background(Pal.Panel)
             .border(1.dp, Pal.Line, RoundedCornerShape(16.dp))
@@ -366,9 +425,78 @@ private fun RowsPanel(doc: ReviewDoc, lang: AppLang, modifier: Modifier) {
                     if (index > 0) {
                         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF121B22)))
                     }
-                    ReviewRowItem(row, lang)
+                    CompareRow(
+                        row = row,
+                        lang = lang,
+                        selected = index == selIndex,
+                        onTap = { onSelect(index) },
+                        onDoubleTap = { onEdit(index) },
+                        onLongPress = { onToggle(index) }
+                    )
                 }
             }
+        }
+    }
+}
+
+/** 行：单击定位原文并选中，双击编辑，长按切换已核对。 */
+@Composable
+private fun CompareRow(
+    row: ReviewRow,
+    lang: AppLang,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onDoubleTap: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    val accent = when {
+        row.verified -> Pal.Teal
+        row.issue == ISSUE_DIFF -> Pal.Danger
+        row.issue == ISSUE_LOW -> Pal.Warm
+        else -> Pal.Faint
+    }
+    val fill = when {
+        selected -> Pal.Teal.copy(alpha = 0.10f)
+        row.verified -> Pal.Teal.copy(alpha = 0.04f)
+        row.issue == ISSUE_DIFF -> Pal.Danger.copy(alpha = 0.08f)
+        row.issue == ISSUE_LOW -> Pal.Warm.copy(alpha = 0.06f)
+        else -> Color.Transparent
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(10.dp)).background(fill)
+            .pointerInput(row) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = { onDoubleTap() },
+                    onLongPress = { onLongPress() }
+                )
+            }
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(row.date, color = Pal.Faint, fontSize = 9.5.sp)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                row.desc.ifBlank { "—" }, color = Pal.Text, fontSize = 12.sp,
+                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                reviewMoney(row.amount),
+                color = if (row.amount < 0) Pal.Danger else Pal.Text,
+                fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
+                color = Pal.Muted, fontSize = 9.5.sp
+            )
         }
     }
 }
