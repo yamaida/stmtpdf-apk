@@ -367,7 +367,7 @@ private fun ReviewRowItem(row: ReviewRow, lang: AppLang, onClick: () -> Unit) {
             )
             Spacer(Modifier.height(3.dp))
             Text(
-                I18n.f(lang, "balance_line", reviewMoney(row.balance ?: 0.0)),
+                I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
                 color = Pal.Muted, fontSize = 9.5.sp
             )
         }
