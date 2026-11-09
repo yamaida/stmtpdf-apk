@@ -216,6 +216,101 @@ function splitOverprinted(entry) {
   });
 }
 
+/* 一条交易被换行拆成「日期行 + 金额行」时合并，避免整行丢失。 */
+function mergeContinuations(entries) {
+  function moneyCount(text) {
+    return (String(text || '').match(MONEY_RE) || []).length;
+  }
+  function mergeBox(first, second) {
+    if (!first || !second) { return first || second || null; }
+    return [
+      Math.min(first[0], second[0]), Math.min(first[1], second[1]),
+      Math.max(first[2], second[2]), Math.max(first[3], second[3])
+    ];
+  }
+  /* 水印把「22.05」这类日期逐字插进了字词里：取纯数字/点后再判日期。 */
+  function recoverDate(text) {
+    var words = String(text || '').split(/\s+/);
+    for (var w = 0; w < words.length; w++) {
+      var word = words[w];
+      if (word.length < 4 || !/[0-9]/.test(word) || !/[A-Za-z]/.test(word)) { continue; }
+      var match = /^(\d{1,2})\.(\d{1,2})$/.exec(word.replace(/[^0-9.]/g, ''));
+      if (!match) { continue; }
+      var day = Number(match[1]);
+      var month = Number(match[2]);
+      if (day < 1 || day > 31 || month < 1 || month > 12) { continue; }
+      return match[1] + '.' + match[2];
+    }
+    return '';
+  }
+  /* 同一基线上的词属于交易行，另一条基线是页脚/水印层。 */
+  function rebuildLayer(entry) {
+    var words = entry.words;
+    if (!words || !words.length) { return null; }
+    var moneyWord = null;
+    words.forEach(function (word) {
+      var token = tokenText(word);
+      if (MONEY_TOKEN_RE.test(token) || /^[A-Za-z]\d[\d.,]*$/.test(token)) { moneyWord = word; }
+    });
+    if (!moneyWord) { return null; }
+    var body = words.filter(function (word) {
+      return Math.abs(word.y - moneyWord.y) <= 0.5;
+    }).sort(function (a, b) { return a.x - b.x; })
+      .map(tokenText).join(' ').replace(/\s+/g, ' ').trim();
+    if (!body) { return null; }
+    return body;
+  }
+  var out = [];
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    var next = entries[i + 1];
+    var text = String(entry.text || '').trim();
+    // 页脚与交易行叠印成一行、日期被逐字插进乱码：按金额所在的基线层重建该行。
+    var garbledWords = text.split(/\s+/).filter(function (word) {
+      return /[A-Za-z]\d[A-Za-z]/.test(word) || /\d[A-Za-z]\d/.test(word);
+    }).length;
+    if (text && garbledWords >= 2 && moneyCount(text) >= 1 && !DATE_LINE_RE.test(text)) {
+      var onlyDate = recoverDate(text);
+      if (onlyDate) {
+        var rebuilt = rebuildLayer(entry);
+        if (rebuilt) {
+          out.push({
+            text: rebuilt, page: entry.page, bbox: entry.bbox,
+            words: null, width: entry.width, merged: true, recovered: onlyDate
+          });
+          continue;
+        }
+      }
+    }
+    if (next && next.page === entry.page && text && text.length <= 80) {
+      var nextText = String(next.text || '').trim();
+      var nextMoney = moneyCount(nextText);
+      if (moneyCount(text) === 0
+        && nextMoney >= 1 && nextMoney <= 2
+        && nextText.length <= 60
+        && !DATE_ANY_RE.test(nextText)
+        && !isStopLine(text) && !isSummaryLine(text)
+        && !isStopLine(nextText) && !isSummaryLine(nextText)) {
+        var recovered = recoverDate(text);
+        out.push({
+          text: (recovered ? recovered + ' ' : text + ' ') + nextText,
+          page: entry.page,
+          bbox: mergeBox(entry.bbox, next.bbox),
+          // 日期是从乱码里恢复的，坐标已对不上行，改用纯文本分词
+          words: recovered ? null
+            : (entry.words && next.words ? entry.words.concat(next.words) : null),
+          width: entry.width,
+          merged: true
+        });
+        i += 1;
+        continue;
+      }
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
 /* 水印字母是单字符 token；只保留长度 > 1 的 token。 */
 function lineTokens(line) {
   var raw = line.words && line.words.length
@@ -228,6 +323,9 @@ function lineTokens(line) {
   raw.forEach(function (token) {
     var text = tokenText(token);
     if (!text) { return; }
+    // 水印字母与金额粘连（K4,728.04）：字母不是内容，剥离后再当金额用。
+    var glued = /^([A-Za-z])(\d{1,3}(?:[ .,]\d{3})*[.,]\d{2})$/.exec(text);
+    if (glued) { text = glued[2]; }
     var hasX = typeof token.x === 'number' && isFinite(token.x);
     var single = text.length <= NOISE_MAX_LEN;
     // 单字符数字是日期里的「1..9 日」，必须保留；单字符字母/符号才是水印。
@@ -504,6 +602,20 @@ function parseLine(line, yearHint, loose, dayFirst) {
   };
 }
 
+/* 叠印乱码里恢复出的 dd.mm → ISO 日期；顺序与整份账单的日/月判定保持一致。 */
+function recoveredDate(value, yearHint, dayFirst) {
+  var parts = String(value || '').split('.');
+  if (parts.length !== 2) { return null; }
+  var first = Number(parts[0]);
+  var second = Number(parts[1]);
+  var day = dayFirst ? first : second;
+  var month = dayFirst ? second : first;
+  if (dayFirst && month > 12 && day <= 12) { var swap = day; day = month; month = swap; }
+  if (!dayFirst && day > 12 && month <= 12) { var swapBack = day; day = month; month = swapBack; }
+  if (day < 1 || day > 31 || month < 1 || month > 12) { return null; }
+  return yearHint + '-' + pad2(month) + '-' + pad2(day);
+}
+
 function scoreRow(row, previous, moneyCount, strictDate) {
   var score = strictDate ? 40 : 24;
   if (row.desc) { score += /[A-Za-z]/.test(row.desc) ? 25 : 12; } else { score -= 15; }
@@ -540,6 +652,7 @@ function parseStatementLines(lines) {
   normalizeLines(lines).forEach(function (entry) {
     entries = entries.concat(splitOverprinted(entry));
   });
+  entries = mergeContinuations(entries);
 
   var yearHint = null;
   for (var i = 0; i < entries.length; i++) {
@@ -647,7 +760,21 @@ function collectRows(entries, yearHint, loose, dayFirst) {
     }
     if (isSummaryLine(text)) { return; }
 
-    var parsed = parseLine(text, yearHint, loose, dayFirst);
+    var parsed = parseLine(text, yearHint, loose || entry.merged === true, dayFirst);
+    if (!parsed && entry.recovered) {
+      // 日期是从叠印乱码里恢复的 dd.mm，按整份账单的日/月顺序换算成 ISO
+      var recoveredIso = recoveredDate(entry.recovered, yearHint, dayFirst);
+      if (recoveredIso) {
+        parsed = {
+          date: recoveredIso,
+          desc: text.replace(MONEY_RE, ' ').replace(/\s+/g, ' ').trim(),
+          amount: null,
+          moneyCount: 0,
+          strictDate: false,
+          dateEnd: 0
+        };
+      }
+    }
     if (!parsed) { return; }
 
     var values = moneyTokens(tokens, parsed, text);
