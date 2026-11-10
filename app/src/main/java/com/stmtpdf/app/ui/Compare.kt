@@ -14,6 +14,7 @@ import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +37,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -44,13 +46,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stmtpdf.app.i18n.AppLang
@@ -140,9 +146,17 @@ internal fun CompareScreen(
     var showAll by remember { mutableStateOf(false) }
     var selIndex by remember(doc.id) { mutableStateOf(-1) }
     var editing by remember { mutableStateOf<ReviewRow?>(null) }
+    var pdfScale by remember(doc.id) { mutableStateOf(1f) }
+    var pdfOffset by remember(doc.id) { mutableStateOf(Offset.Zero) }
+    var pdfBox by remember { mutableStateOf(IntSize.Zero) }
     val pageCount = maxOf(doc.totalPages, doc.pages, 1)
     val currentPage = pageIndex.coerceIn(0, pageCount - 1)
     val density = LocalDensity.current
+
+    // 翻页或点击行后回到居中，避免仍停留在上一页的偏移
+    LaunchedEffect(currentPage, selIndex) {
+        pdfOffset = Offset.Zero
+    }
 
     BackHandler(onBack = onClose)
 
@@ -161,7 +175,46 @@ internal fun CompareScreen(
                         .background(Pal.Tile)
                         .border(1.dp, Pal.Line, RoundedCornerShape(16.dp))
                 ) {
-                    PdfPageView(doc.pdfPath, currentPage, lang, Modifier.fillMaxSize())
+                    Box(
+                        Modifier.fillMaxSize()
+                            .onSizeChanged { pdfBox = it }
+                            .pointerInput(currentPage) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    val next = (pdfScale * zoom).coerceIn(1f, 4f)
+                                    val maxX = pdfBox.width * (next - 1f) / 2f
+                                    val maxY = pdfBox.height * (next - 1f) / 2f
+                                    pdfOffset = Offset(
+                                        (pdfOffset.x + pan.x).coerceIn(-maxX, maxX),
+                                        (pdfOffset.y + pan.y).coerceIn(-maxY, maxY)
+                                    )
+                                    pdfScale = next
+                                }
+                            }
+                    ) {
+                        PdfPageView(
+                            doc.pdfPath, currentPage, lang,
+                            Modifier.fillMaxSize().graphicsLayer {
+                                scaleX = pdfScale
+                                scaleY = pdfScale
+                                translationX = pdfOffset.x
+                                translationY = pdfOffset.y
+                            }
+                        )
+                    }
+                    if (pdfScale > 1.02f) {
+                        Box(
+                            Modifier.align(Alignment.BottomStart).padding(10.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Pal.Panel.copy(alpha = 0.9f))
+                                .border(1.dp, Pal.Line2, RoundedCornerShape(50))
+                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                String.format(java.util.Locale.US, "%.1fx", pdfScale),
+                                color = Pal.Muted, fontSize = 9.sp
+                            )
+                        }
+                    }
                     if (selIndex >= 0) {
                         Box(
                             Modifier.align(Alignment.TopStart).padding(10.dp)
