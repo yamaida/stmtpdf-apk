@@ -295,21 +295,20 @@ internal fun CompareScreen(
                                 pdfGeom = it
                             }
                             if (highlight != null) {
-                                // 只画行下沿的线，避免遮住原文数值
+                                // 细线画在行下沿之外，避免遮住原文数值
                                 Box(
                                     Modifier.offset {
                                         IntOffset(
                                             highlight.left.roundToInt(),
-                                            (highlight.bottom - with(density) { 2.dp.toPx() })
+                                            (highlight.bottom + with(density) { 2.dp.toPx() })
                                                 .roundToInt()
                                         )
                                     }
                                         .size(
                                             with(density) { highlight.width.toDp() },
-                                            2.dp
+                                            1.dp
                                         )
-                                        .clip(RoundedCornerShape(2.dp))
-                                        .background(Pal.Teal)
+                                        .background(Pal.Teal.copy(alpha = 0.9f))
                                 )
                             }
                         }
@@ -622,8 +621,9 @@ private fun CompareRow(
         row.issue == ISSUE_LOW -> Pal.Warm
         else -> Pal.Faint
     }
+    val selectedTint = Color(0xFFF7C948)
     val fill = when {
-        selected -> Pal.Teal.copy(alpha = 0.10f)
+        selected -> selectedTint.copy(alpha = 0.16f)
         row.verified -> Pal.Teal.copy(alpha = 0.04f)
         row.issue == ISSUE_DIFF -> Pal.Danger.copy(alpha = 0.08f)
         row.issue == ISSUE_LOW -> Pal.Warm.copy(alpha = 0.06f)
@@ -632,6 +632,13 @@ private fun CompareRow(
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
             .clip(RoundedCornerShape(10.dp)).background(fill)
+            .then(
+                if (selected) {
+                    Modifier.border(1.dp, selectedTint.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                } else {
+                    Modifier
+                }
+            )
             .pointerInput(row) {
                 detectTapGestures(
                     onTap = { onTap() },
