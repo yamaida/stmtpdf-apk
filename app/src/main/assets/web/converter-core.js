@@ -928,6 +928,19 @@ function markRows(rows) {
   return rows;
 }
 
+/* 编辑单元格后重算：余额保留打印值，只刷新差异标记与勾稽状态。 */
+function recheckRows(rows) {
+  markBalanceSuspect(rows);
+  var previous = null;
+  rows.forEach(function (row) {
+    if (previous && previous.segment !== row.segment) { previous = null; }
+    row.issue = issueForRow(row, previous);
+    if (row.issue === null) { row.verified = true; }
+    previous = row;
+  });
+  return rows;
+}
+
 /* ---------------- QBO / CSV ---------------- */
 function escapeSgml(value) {
   return String(value === undefined || value === null ? '' : value)
@@ -960,6 +973,85 @@ function ofxNow() {
   var d = new Date();
   return '' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) +
     pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
+}
+
+/* ---------------- FITID：与桌面端 app/core/fitid.py 完全一致的算法 ----------------
+ * payload = 账号 | YYYYMMDD | 金额(2 位小数) | 收款方(压缩空白并大写，截 64 字) | 同内容序号
+ * FITID   = sha1(payload) 取前 16 位十六进制
+ * 这样同一笔交易无论导出顺序、增删行如何变化，ID 都保持稳定；跨文件也不会撞号。
+ */
+function sha1Hex(text) {
+  var bytes = [];
+  for (var i = 0; i < text.length; i += 1) {
+    var c = text.charCodeAt(i);
+    if (c < 0x80) {
+      bytes.push(c);
+    } else if (c < 0x800) {
+      bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    } else if (c < 0xd800 || c >= 0xe000) {
+      bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    } else {
+      i += 1;
+      var cp = 0x10000 + (((c & 0x3ff) << 10) | (text.charCodeAt(i) & 0x3ff));
+      bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+    }
+  }
+  var length = bytes.length;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) { bytes.push(0); }
+  var high = Math.floor(length / 536870912);
+  var low = (length * 8) >>> 0;
+  bytes.push((high >>> 24) & 255, (high >>> 16) & 255, (high >>> 8) & 255, high & 255);
+  bytes.push((low >>> 24) & 255, (low >>> 16) & 255, (low >>> 8) & 255, low & 255);
+
+  var h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
+  var w = new Array(80);
+  function rotl(n, s) { return (n << s) | (n >>> (32 - s)); }
+  for (var off = 0; off < bytes.length; off += 64) {
+    for (var j = 0; j < 16; j += 1) {
+      w[j] = (bytes[off + j * 4] << 24) | (bytes[off + j * 4 + 1] << 16) |
+        (bytes[off + j * 4 + 2] << 8) | bytes[off + j * 4 + 3];
+    }
+    for (j = 16; j < 80; j += 1) {
+      w[j] = rotl(w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16], 1);
+    }
+    var a = h0, b = h1, c2 = h2, d = h3, e = h4;
+    for (j = 0; j < 80; j += 1) {
+      var f, k;
+      if (j < 20) { f = (b & c2) | (~b & d); k = 0x5a827999; }
+      else if (j < 40) { f = b ^ c2 ^ d; k = 0x6ed9eba1; }
+      else if (j < 60) { f = (b & c2) | (b & d) | (c2 & d); k = 0x8f1bbcdc; }
+      else { f = b ^ c2 ^ d; k = 0xca62c1d6; }
+      var t = (rotl(a, 5) + f + e + k + w[j]) | 0;
+      e = d; d = c2; c2 = rotl(b, 30); b = a; a = t;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c2) | 0;
+    h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+  }
+  return [h0, h1, h2, h3, h4].map(function (v) {
+    return ('0000000' + (v >>> 0).toString(16)).slice(-8);
+  }).join('');
+}
+
+function normalisePayee(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/\s+/g, ' ')
+    .replace(/^\s+|\s+$/g, '')
+    .toUpperCase()
+    .slice(0, 64);
+}
+
+function fitidKey(accountId, row) {
+  return [
+    accountId || '0000',
+    ofxDate(row.date),
+    Number(row.amount).toFixed(2),
+    normalisePayee(row.desc)
+  ].join('|');
+}
+
+function fitidFor(accountId, row, seq) {
+  return sha1Hex(fitidKey(accountId, row) + '|' + seq).slice(0, 16);
 }
 
 /* 多账户：按行上的 account 标签分组；没有账户标题的账单仍按传入的 accountName 单账户导出。 */
@@ -996,8 +1088,11 @@ function qboStatement(group, seq) {
     '<DTSTART>' + start, '<DTEND>' + end
   ];
 
+  var counters = {};
   rows.forEach(function (row, index) {
-    var fitid = 'SP' + ofxDate(row.date) + ('00' + (index + 1)).slice(-3);
+    var key = fitidKey(group.id, row);
+    counters[key] = (counters[key] || 0) + 1;
+    var fitid = fitidFor(group.id, row, counters[key]);
     lines.push('<STMTTRN>');
     lines.push('<TRNTYPE>' + trnType(row));
     lines.push('<DTPOSTED>' + ofxDate(row.date) + '120000');
@@ -1042,12 +1137,19 @@ function csvCell(value) {
   return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
 }
 
-function buildCsv(rows) {
-  var lines = ['日期,描述,金额,余额,置信度,Account'];
+function buildCsv(rows, headers) {
+  var head = headers || {};
+  var lines = [[
+    csvCell(head.date || 'Date'),
+    csvCell(head.desc || 'Description'),
+    csvCell(head.amount || 'Amount'),
+    csvCell(head.balance || 'Balance'),
+    csvCell(head.account || 'Account')
+  ].join(',')];
   rows.forEach(function (row) {
     lines.push([
       row.date, csvCell(row.desc), Number(row.amount).toFixed(2),
-      row.balance === null ? '' : Number(row.balance).toFixed(2), row.conf + '%',
+      row.balance === null ? '' : Number(row.balance).toFixed(2),
       csvCell(row.account || '')
     ].join(','));
   });
@@ -1061,6 +1163,7 @@ window.StmtPdfCore = {
   normalizeDate: normalizeDate,
   cleanDescription: cleanDescription,
   parseStatementLines: parseStatementLines,
+  recheckRows: recheckRows,
   escapeSgml: escapeSgml,
   trnType: trnType,
   ofxDate: ofxDate,
