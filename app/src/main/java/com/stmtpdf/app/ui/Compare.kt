@@ -295,23 +295,21 @@ internal fun CompareScreen(
                                 pdfGeom = it
                             }
                             if (highlight != null) {
+                                // 只画行下沿的线，避免遮住原文数值
                                 Box(
                                     Modifier.offset {
                                         IntOffset(
                                             highlight.left.roundToInt(),
-                                            highlight.top.roundToInt()
+                                            (highlight.bottom - with(density) { 2.dp.toPx() })
+                                                .roundToInt()
                                         )
                                     }
                                         .size(
                                             with(density) { highlight.width.toDp() },
-                                            with(density) { highlight.height.toDp() }
+                                            2.dp
                                         )
-                                        .clip(RoundedCornerShape(3.dp))
-                                        .background(Pal.Teal.copy(alpha = 0.16f))
-                                        .border(
-                                            1.5.dp, Pal.Teal.copy(alpha = 0.85f),
-                                            RoundedCornerShape(3.dp)
-                                        )
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(Pal.Teal)
                                 )
                             }
                         }
