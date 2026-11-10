@@ -25,6 +25,7 @@ object LocalStats {
     private const val PREFS = "stmtpdf_stats"
     private const val KEY_HISTORY = "history"
     private const val KEY_USAGE = "usage"
+    private const val KEY_ASK_SAVE = "ask_save_location"
     private const val HISTORY_LIMIT = 8
 
     fun history(context: Context): List<HistoryItem> {
@@ -117,6 +118,14 @@ object LocalStats {
             )
         }
         prefs(context).edit().putString(KEY_HISTORY, arr.toString()).apply()
+    }
+
+    /** 导出时是否每次让用户选择保存位置（默认关，自动存 下载/StmtPDF）。 */
+    fun askSaveLocation(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_ASK_SAVE, false)
+
+    fun setAskSaveLocation(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean(KEY_ASK_SAVE, value).apply()
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

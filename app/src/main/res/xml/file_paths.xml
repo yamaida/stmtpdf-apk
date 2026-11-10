@@ -5,4 +5,5 @@
     <cache-path name="pdf" path="pdf/" />
     <files-path name="machine" path="machine/" />
     <external-files-path name="downloads" path="Download/" />
+    <external-path name="public_downloads" path="Download/" />
 </paths>

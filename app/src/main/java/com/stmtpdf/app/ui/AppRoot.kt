@@ -49,6 +49,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -743,6 +744,41 @@ private fun HomeScreen(
     var confirmExport by remember { mutableStateOf<(() -> Unit)?>(null) }
     var confirmExportCount by remember { mutableStateOf(0) }
     var quotaBlocked by remember { mutableStateOf(false) }
+    // 导出落地：结果卡片 / 可选 SAF 选择器 / 低版本存储权限
+    var savedInfo by remember { mutableStateOf<Exporter.Saved?>(null) }
+    var pendingSave by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    var askLocation by remember { mutableStateOf(LocalStats.askSaveLocation(context)) }
+    var pendingProceed by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    // 用户选择目录后写入（设置里开启「每次询问」时走这里）
+    val createDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        val pending = pendingSave
+        pendingSave = null
+        if (uri == null || pending == null) {
+            onNotify(I18n.t(lang, "export_cancelled"), null)
+        } else {
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        Exporter.writeToDocument(context, uri, pending.first, pending.third)
+                    }
+                }.onSuccess { savedInfo = it }
+                    .onFailure { onNotify(I18n.f(lang, "export_failed", it.message ?: "unknown"), null) }
+            }
+        }
+    }
+
+    // Android 9 及以下写公共「下载」需要存储权限
+    val storagePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted: Boolean ->
+        val action = pendingProceed
+        pendingProceed = null
+        if (granted) action?.invoke()
+        else onNotify(I18n.t(lang, "export_hint_private"), null)
+    }
 
     val activeDoc = docs.firstOrNull { it.id == activeId }
     val compareDoc = compareId?.let { id -> docs.firstOrNull { it.id == id } }
@@ -803,19 +839,36 @@ private fun HomeScreen(
         if (doc != null) {
             val json = doc.rowsJson()
             showFormats = false
-            val proceed = {
+            val proceed: () -> Unit = {
                 export(
-                    context, engine, state, doc.pages, kind, json, doc.baseName, lang, onNotify,
-                    onQuotaBlocked = { quotaBlocked = true }
-                ) {
-                    history = LocalStats.history(context)
+                    context, engine, state, doc.pages, kind, json, doc.baseName,
+                    askLocation = askLocation,
+                    onQuotaBlocked = { quotaBlocked = true },
+                    onNeedDocument = { base64, fileName, mime ->
+                        pendingSave = Triple(base64, fileName, mime)
+                        createDocument.launch(fileName)
+                    },
+                    onSaved = { savedInfo = it },
+                    onError = { message -> onNotify(I18n.f(lang, "export_failed", message), null) },
+                    onExported = { history = LocalStats.history(context) }
+                )
+            }
+            val needsStorage = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+                PackageManager.PERMISSION_GRANTED
+            val gated: () -> Unit = if (needsStorage) {
+                {
+                    pendingProceed = proceed
+                    storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 }
+            } else {
+                proceed
             }
             if (doc.pending > 0) {
                 confirmExportCount = doc.pending
-                confirmExport = proceed
+                confirmExport = gated
             } else {
-                proceed()
+                gated()
             }
         }
     }
@@ -1015,8 +1068,80 @@ private fun HomeScreen(
                 FormatOption("Excel", I18n.t(lang, "fmt_xlsx_desc")) { startExport("xlsx") }
                 Spacer(Modifier.height(8.dp))
                 FormatOption("CSV", I18n.t(lang, "fmt_csv_desc")) { startExport("csv") }
+                Spacer(Modifier.height(16.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            I18n.t(lang, "export_ask_location"), color = Pal.Text,
+                            fontSize = 12.5.sp
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            I18n.t(lang, "export_ask_location_desc"), color = Pal.Faint,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Switch(
+                        checked = askLocation,
+                        onCheckedChange = {
+                            askLocation = it
+                            LocalStats.setAskSaveLocation(context, it)
+                        }
+                    )
+                }
             }
         }
+    }
+
+    savedInfo?.let { saved ->
+        AlertDialog(
+            onDismissRequest = { savedInfo = null },
+            containerColor = Pal.Panel,
+            title = {
+                Text(
+                    I18n.t(lang, "export_saved_title"), color = Pal.Text,
+                    fontSize = 16.sp, fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(saved.path, color = Pal.Text, fontSize = 12.5.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        I18n.t(
+                            lang,
+                            when {
+                                saved.picked -> "export_saved_picker"
+                                saved.isPrivate -> "export_hint_private"
+                                else -> "export_hint_public"
+                            }
+                        ),
+                        color = Pal.Faint, fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = {
+                        savedInfo = null
+                        Exporter.share(context, saved.uri, saved.mime)
+                    }) {
+                        Text(I18n.t(lang, "share"), color = Pal.Teal, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = {
+                        savedInfo = null
+                        if (!Exporter.open(context, saved.uri, saved.mime)) {
+                            onNotify(I18n.t(lang, "open_failed"), null)
+                        }
+                    }) {
+                        Text(I18n.t(lang, "export_open"), color = Pal.Teal, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { savedInfo = null }) {
+                        Text(I18n.t(lang, "export_ok"), color = Pal.Text, fontSize = 12.sp)
+                    }
+                }
+            }
+        )
     }
 
     if (showPicker) {
@@ -1301,9 +1426,11 @@ private fun export(
     kind: String,
     rowsJson: String,
     baseName: String,
-    lang: AppLang,
-    notify: (String, (() -> Unit)?) -> Unit,
+    askLocation: Boolean,
     onQuotaBlocked: () -> Unit,
+    onNeedDocument: (base64: String, fileName: String, mime: String) -> Unit,
+    onSaved: (Exporter.Saved) -> Unit,
+    onError: (String) -> Unit,
     onExported: () -> Unit
 ) {
     kotlinx.coroutines.MainScope().launch {
@@ -1324,14 +1451,15 @@ private fun export(
                 return@launch
             }
             state.consume(pages)
-            val (uri, _) = withContext(Dispatchers.IO) { Exporter.save(context, base64, fileName, mime) }
             LocalStats.markExported(context, baseName, kind)
-            onExported()
-            notify(I18n.f(lang, "export_saved", fileName)) {
-                Exporter.share(context, uri, mime)
+            if (askLocation) {
+                onNeedDocument(base64, fileName, mime)
+            } else {
+                onSaved(withContext(Dispatchers.IO) { Exporter.save(context, base64, fileName, mime) })
             }
+            onExported()
         } catch (e: Throwable) {
-            notify(I18n.f(lang, "export_failed", e.message ?: "unknown"), null)
+            onError(e.message ?: "unknown")
         }
     }
 }
