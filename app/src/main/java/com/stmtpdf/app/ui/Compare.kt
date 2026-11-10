@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -42,11 +43,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -56,6 +59,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,26 +68,41 @@ import com.stmtpdf.app.i18n.I18n
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.roundToInt
 
 private const val PDF_RENDER_WIDTH = 1080
 private const val SPLIT_MIN = 0.25f
 private const val SPLIT_MAX = 0.80f
 
-/** PdfRenderer 渲染结果；bitmap 为空表示该页无法渲染。 */
-private data class PdfRender(val bitmap: Bitmap?, val loading: Boolean)
+/** PdfRenderer 渲染结果；bitmap 为空表示该页无法渲染。宽高为 PDF 点（1/72 英寸）。 */
+private data class PdfRender(
+    val bitmap: Bitmap?,
+    val loading: Boolean,
+    val pageWidth: Float = 0f,
+    val pageHeight: Float = 0f
+)
 
-/** 打开 PDF 渲染指定页；失败（文件被清理 / 加密）返回 null。 */
-private fun renderPdfPage(path: String, index: Int): Bitmap? {
-    if (path.isBlank()) return null
+/** 一页的渲染几何：用于把识别行的 bbox 换算成屏幕坐标。 */
+private data class PdfGeom(
+    val page: Int,
+    val pageWidth: Float,
+    val pageHeight: Float,
+    val bitmapWidth: Int,
+    val bitmapHeight: Int
+)
+
+/** 打开 PDF 渲染指定页；失败（文件被清理 / 加密）返回空 bitmap。 */
+private fun renderPdfPage(path: String, index: Int): PdfRender {
+    if (path.isBlank()) return PdfRender(null, false)
     val file = File(path)
-    if (!file.exists()) return null
+    if (!file.exists()) return PdfRender(null, false)
     var descriptor: ParcelFileDescriptor? = null
     var renderer: PdfRenderer? = null
     var page: PdfRenderer.Page? = null
     return try {
         descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         renderer = PdfRenderer(descriptor)
-        if (renderer.pageCount <= 0) return null
+        if (renderer.pageCount <= 0) return PdfRender(null, false)
         page = renderer.openPage(index.coerceIn(0, renderer.pageCount - 1))
         val scale = (PDF_RENDER_WIDTH.toFloat() / page.width).coerceAtMost(2.5f)
         val width = (page.width * scale).toInt().coerceAtLeast(1)
@@ -91,9 +110,9 @@ private fun renderPdfPage(path: String, index: Int): Bitmap? {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(AndroidColor.WHITE)
         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-        bitmap
+        PdfRender(bitmap, false, page.width.toFloat(), page.height.toFloat())
     } catch (e: Throwable) {
-        null
+        PdfRender(null, false)
     } finally {
         runCatching { page?.close() }
         runCatching { renderer?.close() }
@@ -101,11 +120,51 @@ private fun renderPdfPage(path: String, index: Int): Bitmap? {
     }
 }
 
+/** 把行 bbox（PDF 点、原点左下）换算成容器内像素矩形，与 ContentScale.Fit 的显示区域对齐。 */
+private fun rowRect(bbox: List<Double>?, geom: PdfGeom, box: IntSize, padPx: Float): Rect? {
+    if (bbox == null || bbox.size != 4) return null
+    if (geom.pageWidth <= 0f || geom.pageHeight <= 0f) return null
+    if (geom.bitmapWidth <= 0 || geom.bitmapHeight <= 0) return null
+    val availW = box.width - padPx * 2
+    val availH = box.height - padPx * 2
+    if (availW <= 0f || availH <= 0f) return null
+    val fit = minOf(
+        availW / geom.bitmapWidth.toFloat(),
+        availH / geom.bitmapHeight.toFloat()
+    )
+    val drawW = geom.bitmapWidth * fit
+    val drawH = geom.bitmapHeight * fit
+    val left = padPx + (availW - drawW) / 2f
+    val top = padPx + (availH - drawH) / 2f
+    val sx = drawW / geom.pageWidth
+    val sy = drawH / geom.pageHeight
+    val x1 = left + bbox[0].toFloat() * sx
+    val x2 = left + bbox[2].toFloat() * sx
+    val y1 = top + (geom.pageHeight - bbox[3].toFloat()) * sy
+    val y2 = top + (geom.pageHeight - bbox[1].toFloat()) * sy
+    val w = (x2 - x1).coerceAtLeast(6f)
+    val h = (y2 - y1).coerceAtLeast(6f)
+    return Rect(x1, y1, x1 + w, y1 + h)
+}
+
 @Composable
-private fun PdfPageView(pdfPath: String, page: Int, lang: AppLang, modifier: Modifier) {
+private fun PdfPageView(
+    pdfPath: String,
+    page: Int,
+    lang: AppLang,
+    modifier: Modifier,
+    onGeom: (PdfGeom) -> Unit = {}
+) {
+    val geomCb by rememberUpdatedState(onGeom)
     val state by produceState(PdfRender(null, true), pdfPath, page) {
-        val bitmap = withContext(Dispatchers.IO) { renderPdfPage(pdfPath, page) }
-        value = PdfRender(bitmap, false)
+        val render = withContext(Dispatchers.IO) { renderPdfPage(pdfPath, page) }
+        value = render
+        val bitmap = render.bitmap
+        if (bitmap != null && render.pageWidth > 0f && render.pageHeight > 0f) {
+            geomCb(
+                PdfGeom(page + 1, render.pageWidth, render.pageHeight, bitmap.width, bitmap.height)
+            )
+        }
     }
     Box(modifier, contentAlignment = Alignment.Center) {
         val bitmap = state.bitmap
@@ -149,13 +208,44 @@ internal fun CompareScreen(
     var pdfScale by remember(doc.id) { mutableStateOf(1f) }
     var pdfOffset by remember(doc.id) { mutableStateOf(Offset.Zero) }
     var pdfBox by remember { mutableStateOf(IntSize.Zero) }
+    var pdfGeom by remember(doc.id) { mutableStateOf<PdfGeom?>(null) }
+    var locateTick by remember(doc.id) { mutableStateOf(0) }
     val pageCount = maxOf(doc.totalPages, doc.pages, 1)
     val currentPage = pageIndex.coerceIn(0, pageCount - 1)
     val density = LocalDensity.current
+    val pdfPadPx = with(density) { 6.dp.toPx() }
 
-    // 翻页或点击行后回到居中，避免仍停留在上一页的偏移
-    LaunchedEffect(currentPage, selIndex) {
+    // 手动翻页时回到居中，避免仍停留在上一页的偏移
+    LaunchedEffect(currentPage) {
         pdfOffset = Offset.Zero
+    }
+
+    // 点击交易行：把原文窗口缩放到该行位置并居中，等效网页端的滚动定位
+    LaunchedEffect(locateTick, pdfGeom, pdfBox) {
+        if (locateTick <= 0) return@LaunchedEffect
+        val geom = pdfGeom ?: return@LaunchedEffect
+        if (geom.page != currentPage + 1) return@LaunchedEffect
+        if (pdfBox.width <= 0 || pdfBox.height <= 0) return@LaunchedEffect
+        val rect = rowRect(doc.rows.getOrNull(selIndex)?.bbox, geom, pdfBox, pdfPadPx)
+            ?: return@LaunchedEffect
+        val target = maxOf(pdfScale, 1.8f)
+        val maxX = pdfBox.width * (target - 1f) / 2f
+        val maxY = pdfBox.height * (target - 1f) / 2f
+        pdfScale = target
+        pdfOffset = Offset(
+            (pdfBox.width / 2f - rect.center.x * target).coerceIn(-maxX, maxX),
+            (pdfBox.height / 2f - rect.center.y * target).coerceIn(-maxY, maxY)
+        )
+    }
+
+    // 当前选中行在原文中的高亮框（随缩放/平移一起变换）
+    val highlight = remember(selIndex, pdfGeom, pdfBox, currentPage, density) {
+        val geom = pdfGeom
+        if (geom == null || geom.page != currentPage + 1) {
+            null
+        } else {
+            rowRect(doc.rows.getOrNull(selIndex)?.bbox, geom, pdfBox, pdfPadPx)
+        }
     }
 
     BackHandler(onBack = onClose)
@@ -191,15 +281,38 @@ internal fun CompareScreen(
                                 }
                             }
                     ) {
-                        PdfPageView(
-                            doc.pdfPath, currentPage, lang,
+                        Box(
                             Modifier.fillMaxSize().graphicsLayer {
                                 scaleX = pdfScale
                                 scaleY = pdfScale
                                 translationX = pdfOffset.x
                                 translationY = pdfOffset.y
                             }
-                        )
+                        ) {
+                            PdfPageView(doc.pdfPath, currentPage, lang, Modifier.fillMaxSize()) {
+                                pdfGeom = it
+                            }
+                            if (highlight != null) {
+                                Box(
+                                    Modifier.offset {
+                                        IntOffset(
+                                            highlight.left.roundToInt(),
+                                            highlight.top.roundToInt()
+                                        )
+                                    }
+                                        .size(
+                                            with(density) { highlight.width.toDp() },
+                                            with(density) { highlight.height.toDp() }
+                                        )
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Pal.Teal.copy(alpha = 0.16f))
+                                        .border(
+                                            1.5.dp, Pal.Teal.copy(alpha = 0.85f),
+                                            RoundedCornerShape(3.dp)
+                                        )
+                                )
+                            }
+                        }
                     }
                     if (pdfScale > 1.02f) {
                         Box(
@@ -251,6 +364,7 @@ internal fun CompareScreen(
                         doc.rows.getOrNull(index)?.page?.let { page ->
                             pageIndex = (page - 1).coerceIn(0, pageCount - 1)
                         }
+                        locateTick += 1
                     },
                     onEdit = { index ->
                         selIndex = index
