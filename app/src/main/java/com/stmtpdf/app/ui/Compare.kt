@@ -210,6 +210,7 @@ internal fun CompareScreen(
     var pdfBox by remember { mutableStateOf(IntSize.Zero) }
     var pdfGeom by remember(doc.id) { mutableStateOf<PdfGeom?>(null) }
     var locateTick by remember(doc.id) { mutableStateOf(0) }
+    var focusedTick by remember(doc.id) { mutableStateOf(-1) }
     val pageCount = maxOf(doc.totalPages, doc.pages, 1)
     val currentPage = pageIndex.coerceIn(0, pageCount - 1)
     val density = LocalDensity.current
@@ -222,7 +223,7 @@ internal fun CompareScreen(
 
     // 点击交易行：把原文窗口缩放到该行位置并居中，等效网页端的滚动定位
     LaunchedEffect(locateTick, pdfGeom, pdfBox) {
-        if (locateTick <= 0) return@LaunchedEffect
+        if (locateTick <= 0 || focusedTick == locateTick) return@LaunchedEffect
         val geom = pdfGeom ?: return@LaunchedEffect
         if (geom.page != currentPage + 1) return@LaunchedEffect
         if (pdfBox.width <= 0 || pdfBox.height <= 0) return@LaunchedEffect
@@ -236,6 +237,7 @@ internal fun CompareScreen(
             (pdfBox.width / 2f - rect.center.x * target).coerceIn(-maxX, maxX),
             (pdfBox.height / 2f - rect.center.y * target).coerceIn(-maxY, maxY)
         )
+        focusedTick = locateTick
     }
 
     // 当前选中行在原文中的高亮框（随缩放/平移一起变换）
