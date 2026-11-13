@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -396,8 +395,6 @@ internal fun CompareScreen(
                                 pageIndex = (page - 1).coerceIn(0, pageCount - 1)
                             }
                             locateTick += 1
-                            // 移动端无 hover：单击行即弹编辑框（双击仍保留）
-                            editing = doc.rows.getOrNull(index)
                         },
                         onEdit = { index ->
                             selIndex = index
@@ -453,8 +450,6 @@ internal fun CompareScreen(
                 row.desc = desc
                 amount.replace(",", "").toDoubleOrNull()?.let { row.amount = it }
                 row.balance = balance.replace(",", "").toDoubleOrNull()
-                // 保存即视为已修改并自动核对：绿点 + 杏黄标记并存
-                row.editedMark = true
                 row.verified = true
                 recomputeIssues(doc)
                 editing = null
@@ -697,15 +692,6 @@ private fun RowsPanel(
                 fontSize = 9.sp, maxLines = 1
             )
         }
-        // 图例与网页端一致：绿=已核对、黄=已修改（只做圆点，不出现「已改」文字标签）
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 7.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            LegendDot(Pal.Teal, I18n.t(lang, "legend_verified"))
-            LegendDot(EditedYellow, I18n.t(lang, "legend_edited"))
-        }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF121B22)))
         if (doc.rows.isEmpty()) {
             Text(
@@ -732,16 +718,7 @@ private fun RowsPanel(
     }
 }
 
-@Composable
-private fun LegendDot(color: Color, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(6.dp).background(color, CircleShape))
-        Spacer(Modifier.width(5.dp))
-        Text(label, color = Pal.Faint, fontSize = 9.sp, maxLines = 1)
-    }
-}
-
-/** 行：单击定位原文并弹编辑框，双击同样编辑，长按切换已核对。 */
+/** 行：单击定位原文并选中，双击编辑，长按切换已核对。 */
 @Composable
 private fun CompareRow(
     row: ReviewRow,
@@ -760,13 +737,12 @@ private fun CompareRow(
     val selectedTint = Color(0xFFF7C948)
     val fill = when {
         selected -> selectedTint.copy(alpha = 0.16f)
-        row.edited -> EditedYellow.copy(alpha = 0.16f)
         row.verified -> Pal.Teal.copy(alpha = 0.04f)
         row.issue == ISSUE_DIFF -> Pal.Danger.copy(alpha = 0.08f)
         row.issue == ISSUE_LOW -> Pal.Warm.copy(alpha = 0.06f)
         else -> Color.Transparent
     }
-    Box(
+    Row(
         Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
             .clip(RoundedCornerShape(10.dp)).background(fill)
             .then(
@@ -783,48 +759,31 @@ private fun CompareRow(
                     onLongPress = { onLongPress() }
                 )
             }
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 行首黄点=已修改；状态点保留绿（已核对）/红（差异）/琥珀（低置信）
-            if (row.edited) {
-                Box(Modifier.size(6.dp).background(EditedYellow, CircleShape))
-                Spacer(Modifier.width(5.dp))
-            }
-            Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(row.date, color = Pal.Faint, fontSize = 9.5.sp)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    row.desc.ifBlank { "—" }, color = Pal.Text, fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    reviewMoney(row.amount),
-                    color = if (row.amount < 0) Pal.Danger else Pal.Text,
-                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
-                    color = Pal.Muted, fontSize = 9.5.sp
-                )
-            }
+        Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(row.date, color = Pal.Faint, fontSize = 9.5.sp)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                row.desc.ifBlank { "—" }, color = Pal.Text, fontSize = 12.sp,
+                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
         }
-        // 左侧 3px 杏黄竖条（网页端 is-edited 同款）
-        if (row.edited) {
-            Box(Modifier.matchParentSize()) {
-                Box(
-                    Modifier.align(Alignment.CenterStart).width(3.dp).fillMaxHeight()
-                        .background(EditedYellow)
-                )
-            }
+        Spacer(Modifier.width(10.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                reviewMoney(row.amount),
+                color = if (row.amount < 0) Pal.Danger else Pal.Text,
+                fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
+                color = Pal.Muted, fontSize = 9.5.sp
+            )
         }
     }
 }

@@ -904,30 +904,6 @@ private fun HomeScreen(
         onFullscreen(false)
     }
 
-    /** 导出完成弹窗的「新任务」：清空当前工作区，回到首页导入态。 */
-    fun startNewTask() {
-        parseJob?.cancel()
-        parseJob = null
-        docs = emptyList()
-        docSources = emptyMap()
-        activeId = 0L
-        compareId = null
-        activeRow = null
-        editingRow = null
-        picked = emptyList()
-        parseQueue = emptyList()
-        parseIndex = 0
-        parseTotal = 0
-        progress = 0f
-        status = ""
-        cameBackFromReview = false
-        taskNo = 0
-        taskAt = 0L
-        reviewFromParse = false
-        stage = Stage.HOME
-        onFullscreen(false)
-    }
-
     /** 记录被删除 / 清空后回到首页，避免停留在已无内容的校对或解析页。 */
     fun resetToHome() {
         compareId = null
@@ -1272,14 +1248,10 @@ private fun HomeScreen(
         if (parseQueue.isEmpty()) backToHome()
     }
 
-    /** 校对页「导出」：进入整页文件选择；游客只能导出当前文件，会员可多选。 */
+    /** 校对页「导出」：进入整页文件选择，默认勾选当前文件。 */
     fun openExport() {
         if (activeId <= 0L) return
-        exportIds = if (state.active) {
-            docs.map { it.id }.toSet()
-        } else {
-            setOf(activeId)
-        }
+        exportIds = setOf(activeId)
         stage = Stage.EXPORT_PICK
         onFullscreen(true)
     }
@@ -1473,21 +1445,15 @@ private fun HomeScreen(
         )
     } else if (stage == Stage.EXPORT_PICK) {
         ExportPickScreen(
-            docs = if (state.active) docs else docs.filter { it.id == activeId },
+            docs = docs,
             selected = exportIds,
             lang = lang,
-            multi = state.active,
             onBack = { closeExport() },
             onToggle = { id ->
-                // 游客只能导出当前文件，不允许取消勾选
-                if (state.active) {
-                    exportIds = if (id in exportIds) exportIds - id else exportIds + id
-                }
+                exportIds = if (id in exportIds) exportIds - id else exportIds + id
             },
             onToggleAll = {
-                if (state.active) {
-                    exportIds = if (exportIds.size == docs.size) emptySet() else docs.map { it.id }.toSet()
-                }
+                exportIds = if (exportIds.size == docs.size) emptySet() else docs.map { it.id }.toSet()
             },
             onNext = { stage = Stage.EXPORT_FORMAT }
         )
@@ -1611,39 +1577,30 @@ private fun HomeScreen(
     } // 非解析态
     } // Box
 
-    // 导出结果：与网页端一致，只保留「继续校对 / 新任务」两个动作
+    // 导出结果：一份或多份都走同一个结果弹窗
     if (savedBatch.isNotEmpty() || exportFailed > 0) {
         val saved = savedBatch
-        fun closeDone() {
-            savedBatch = emptyList()
-            exportFailed = 0
-        }
         AlertDialog(
             onDismissRequest = {
-                closeDone()
-                stage = Stage.REVIEW
-                onFullscreen(true)
+                savedBatch = emptyList()
+                exportFailed = 0
             },
             containerColor = Pal.Panel,
             title = {
                 Text(
-                    if (saved.isEmpty()) I18n.t(lang, "export_failed_title")
-                    else I18n.t(lang, "export_done_title"),
+                    if (saved.isEmpty()) {
+                        I18n.t(lang, "export_failed_title")
+                    } else {
+                        I18n.f(lang, "export_batch_saved", saved.size)
+                    },
                     color = Pal.Text, fontSize = 16.sp, fontWeight = FontWeight.Bold
                 )
             },
             text = {
                 Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
-                    if (saved.isNotEmpty()) {
-                        Text(
-                            I18n.f(lang, "export_done_body", saved.size),
-                            color = Pal.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        saved.forEach { item ->
-                            Text(item.path, color = Pal.Muted, fontSize = 11.sp)
-                            Spacer(Modifier.height(4.dp))
-                        }
+                    saved.forEach { item ->
+                        Text(item.path, color = Pal.Text, fontSize = 12.sp)
+                        Spacer(Modifier.height(4.dp))
                     }
                     if (exportFailed > 0) {
                         Spacer(Modifier.height(6.dp))
@@ -1652,40 +1609,47 @@ private fun HomeScreen(
                             color = Pal.Danger, fontSize = 11.sp
                         )
                     }
-                    if (saved.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            I18n.t(
-                                lang,
-                                when {
-                                    saved.any { it.picked } -> "export_saved_picker"
-                                    saved.any { it.isPrivate } -> "export_hint_private"
-                                    else -> "export_hint_public"
-                                }
-                            ),
-                            color = Pal.Faint, fontSize = 11.sp
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    closeDone()
-                    stage = Stage.REVIEW
-                    onFullscreen(true)
-                }) {
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        I18n.t(lang, "continue_review"), color = Pal.Teal,
-                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                        I18n.t(
+                            lang,
+                            when {
+                                saved.any { it.picked } -> "export_saved_picker"
+                                saved.any { it.isPrivate } -> "export_hint_private"
+                                else -> "export_hint_public"
+                            }
+                        ),
+                        color = Pal.Faint, fontSize = 11.sp
                     )
                 }
             },
-            dismissButton = {
-                TextButton(onClick = {
-                    closeDone()
-                    startNewTask()
-                }) {
-                    Text(I18n.t(lang, "new_task"), color = Pal.Muted, fontSize = 12.sp)
+            confirmButton = {
+                Row {
+                    if (saved.size == 1) {
+                        val one = saved.first()
+                        TextButton(onClick = {
+                            savedBatch = emptyList()
+                            exportFailed = 0
+                            Exporter.share(context, one.uri, one.mime)
+                        }) {
+                            Text(I18n.t(lang, "share"), color = Pal.Teal, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = {
+                            savedBatch = emptyList()
+                            exportFailed = 0
+                            if (!Exporter.open(context, one.uri, one.mime)) {
+                                onNotify(I18n.t(lang, "open_failed"), null)
+                            }
+                        }) {
+                            Text(I18n.t(lang, "export_open"), color = Pal.Teal, fontSize = 12.sp)
+                        }
+                    }
+                    TextButton(onClick = {
+                        savedBatch = emptyList()
+                        exportFailed = 0
+                    }) {
+                        Text(I18n.t(lang, "export_ok"), color = Pal.Text, fontSize = 12.sp)
+                    }
                 }
             }
         )
@@ -1764,9 +1728,6 @@ private fun HomeScreen(
                 editRow.desc = desc
                 editRow.amount = amount
                 editRow.balance = balance
-                // 保存即视为已修改并自动核对：绿点 + 杏黄标记并存
-                editRow.editedMark = true
-                editRow.verified = true
                 docOf(editRow)?.let { recomputeIssues(it) }
                 editingRow = null
             }
@@ -2467,7 +2428,6 @@ private fun ExportPickScreen(
     docs: List<ReviewDoc>,
     selected: Set<Long>,
     lang: AppLang,
-    multi: Boolean,
     onBack: () -> Unit,
     onToggle: (Long) -> Unit,
     onToggleAll: () -> Unit,
@@ -2497,28 +2457,26 @@ private fun ExportPickScreen(
 
         Spacer(Modifier.height(14.dp))
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            // 游客仅单文件导出，不显示全选；会员多选时提供全选
-            if (multi) {
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .clickable(onClick = onToggleAll)
-                        .padding(horizontal = 4.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CheckDot(allSelected)
-                    Spacer(Modifier.width(9.dp))
-                    Text(
-                        I18n.t(lang, "select_all"), color = Pal.Text,
-                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        I18n.f(lang, "selected_count", chosen.size, chosen.sumOf { it.pages }),
-                        color = Pal.Faint, fontSize = 9.5.sp
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onToggleAll)
+                    .padding(horizontal = 4.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CheckDot(allSelected)
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    I18n.t(lang, "select_all"), color = Pal.Text,
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    I18n.f(lang, "selected_count", chosen.size, chosen.sumOf { it.pages }),
+                    color = Pal.Faint, fontSize = 9.5.sp
+                )
             }
+
+            Spacer(Modifier.height(8.dp))
             PanelCard(radius = 16.dp) {
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
                     docs.forEachIndexed { index, doc ->

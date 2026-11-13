@@ -64,9 +64,6 @@ internal const val REVIEW_LOW_CONF = 60
 internal const val ISSUE_DIFF = "diff"
 internal const val ISSUE_LOW = "low"
 
-/** 与网页端 .is-edited 一致的杏黄色：只做底色 / 左条 / 圆点，绝不出现「已改」文字。 */
-internal val EditedYellow = Color(0xFFFACC15)
-
 enum class DocStatus { BAD, IDLE, DONE }
 
 /** 单条交易行：金额/余额/摘要可被用户修正；改动与 verified 会写成草稿落盘。 */
@@ -93,14 +90,12 @@ class ReviewRow(
     var balance by mutableStateOf(balance)
     var issue by mutableStateOf<String?>(null)
     var verified by mutableStateOf(false)
-    // 与网页端一致：打开编辑并点「确定」即视为已修改，即使这次没有改值
-    var editedMark by mutableStateOf(false)
 
     val hasIssue: Boolean get() = issue != null
 
     /** 是否被手动改过。 */
     val edited: Boolean
-        get() = editedMark || date != origDate || desc != origDesc ||
+        get() = date != origDate || desc != origDesc ||
             amount != origAmount || balance != origBalance
 
     /** 是否需要进草稿：改过或已核对。 */
@@ -229,7 +224,6 @@ internal fun applyDraft(doc: ReviewDoc, draft: JSONObject?) {
             row.balance = if (o.isNull("balance")) null else o.optDouble("balance", 0.0)
         }
         row.verified = o.optBoolean("verified", false)
-        row.editedMark = o.optBoolean("edited", false)
     }
 }
 
@@ -246,7 +240,6 @@ internal fun ReviewDoc.draftRows(): JSONArray {
                 put("amount", row.amount)
                 put("balance", row.balance ?: JSONObject.NULL)
                 put("verified", row.verified)
-                put("edited", row.edited)
             }
         )
     }
@@ -409,60 +402,41 @@ internal fun ReviewRowItem(row: ReviewRow, lang: AppLang, onClick: () -> Unit = 
         row.issue == ISSUE_LOW -> Pal.Warm
         else -> Pal.Faint
     }
-    // 已修改行用杏黄底；与已核对绿点并存（绿点保留在行尾状态位）
     val fill = when {
-        row.edited -> EditedYellow.copy(alpha = 0.16f)
         row.verified -> Pal.Teal.copy(alpha = 0.04f)
         row.issue == ISSUE_DIFF -> Pal.Danger.copy(alpha = 0.08f)
         row.issue == ISSUE_LOW -> Pal.Warm.copy(alpha = 0.06f)
         else -> Color.Transparent
     }
-    Box(
+    Row(
         Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp)
             .clip(RoundedCornerShape(10.dp)).background(fill)
             .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 行首黄点 = 已修改；后面紧跟绿/红/琥珀状态点
-            if (row.edited) {
-                Box(Modifier.size(6.dp).background(EditedYellow, CircleShape))
-                Spacer(Modifier.width(5.dp))
-            }
-            StatusDot(accent, 8.dp)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(row.date, color = Pal.Faint, fontSize = 9.5.sp)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    row.desc.ifBlank { "—" }, color = Pal.Text, fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    reviewMoney(row.amount),
-                    color = if (row.amount < 0) Pal.Danger else Pal.Text,
-                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
-                    color = Pal.Muted, fontSize = 9.5.sp
-                )
-            }
+        StatusDot(accent, 8.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(row.date, color = Pal.Faint, fontSize = 9.5.sp)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                row.desc.ifBlank { "—" }, color = Pal.Text, fontSize = 12.sp,
+                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
         }
-        // 左侧 3px 黄条（与网页端 tr.edited 的左竖条一致）
-        if (row.edited) {
-            Box(Modifier.matchParentSize()) {
-                Box(
-                    Modifier.align(Alignment.CenterStart).width(3.dp).fillMaxHeight()
-                        .background(EditedYellow)
-                )
-            }
+        Spacer(Modifier.width(10.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                reviewMoney(row.amount),
+                color = if (row.amount < 0) Pal.Danger else Pal.Text,
+                fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                I18n.f(lang, "balance_line", row.balance?.let { reviewMoney(it) } ?: "—"),
+                color = Pal.Muted, fontSize = 9.5.sp
+            )
         }
     }
 }
@@ -688,8 +662,6 @@ internal fun ReviewEditDialog(
     var desc by remember { mutableStateOf(row.desc) }
     var amount by remember { mutableStateOf(String.format(Locale.US, "%.2f", row.amount)) }
     var balance by remember { mutableStateOf(row.balance?.let { String.format(Locale.US, "%.2f", it) } ?: "") }
-    // 只有余额行才显示期末余额，避免无余额行被误改
-    val hasBalance = row.balance != null
 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -706,17 +678,15 @@ internal fun ReviewEditDialog(
                 EditField(I18n.t(lang, "field_desc"), desc) { desc = it }
                 Spacer(Modifier.height(8.dp))
                 EditField(I18n.t(lang, "field_amount"), amount) { amount = it }
-                if (hasBalance) {
-                    Spacer(Modifier.height(8.dp))
-                    EditField(I18n.t(lang, "field_ending_balance"), balance) { balance = it }
-                }
+                Spacer(Modifier.height(8.dp))
+                EditField(I18n.t(lang, "field_balance"), balance) { balance = it }
             }
         },
         confirmButton = {
             androidx.compose.material3.TextButton(
                 onClick = { onSave(date.trim(), desc.trim(), amount.trim(), balance.trim()) }
             ) {
-                Text(I18n.t(lang, "ok"), color = Pal.Teal, fontWeight = FontWeight.SemiBold)
+                Text(I18n.t(lang, "save"), color = Pal.Teal, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
