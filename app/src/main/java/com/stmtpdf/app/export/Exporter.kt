@@ -41,6 +41,48 @@ object Exporter {
         return Saved(uri, name, mime, isPrivate = false, picked = true)
     }
 
+    /**
+     * 写入用户长期指定的目录（ACTION_OPEN_DOCUMENT_TREE）。
+     * 目录不可用 / 无写权限时返回 null，由调用方回退到默认下载目录。
+     */
+    fun saveToTree(
+        context: Context,
+        treeUri: Uri,
+        base64: String,
+        fileName: String,
+        mime: String
+    ): Saved? = runCatching {
+        val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+        val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+        // 标准 SAF 建文件；少数 provider 不支持时退回 insert
+        val uri = android.provider.DocumentsContract.createDocument(
+            context.contentResolver, parent, mime, fileName
+        ) ?: context.contentResolver.insert(parent, ContentValues().apply {
+            put(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME, fileName)
+            put(android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE, mime)
+        }) ?: throw IllegalStateException("cannot create document")
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                ?: throw IllegalStateException("cannot write document")
+        } catch (t: Throwable) {
+            // 写失败就删掉刚建的文件，避免目录里残留 0 字节文件
+            runCatching {
+                android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
+            }
+            throw t
+        }
+        val folder = treeLabel(treeUri)
+        Saved(uri, if (folder.isEmpty()) fileName else "$folder/$fileName", mime, picked = true)
+    }.getOrNull()
+
+    /** tree URI 转成可读目录名，例如 primary:Documents/Statements → Documents/Statements。 */
+    fun treeLabel(treeUri: Uri): String = runCatching {
+        val id = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        id.substringAfter(':', id)
+    }.getOrDefault("")
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
     private fun saveToMediaStore(
         context: Context,
         bytes: ByteArray,

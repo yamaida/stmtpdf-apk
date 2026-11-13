@@ -1,6 +1,7 @@
 package com.stmtpdf.app.update
 
 import android.content.Context
+import android.os.Build
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 import java.io.File
@@ -37,6 +38,11 @@ object UpdateChecker {
     private const val CHUNK = 64 * 1024
     private const val HTTP_RANGE_NOT_SATISFIABLE = 416
 
+    /** contentLengthLong 是 API 24+，minSdk 23 上要退回 contentLength。 */
+    private fun HttpURLConnection.lengthOrUnknown(): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) contentLengthLong
+        else contentLength.toLong()
+
     /** HEAD 取远端字节数：-1 = 服务器说文件不存在，0 = 网络问题无法判断。 */
     private fun remoteSize(url: String): Long = try {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -47,7 +53,7 @@ object UpdateChecker {
             setRequestProperty("User-Agent", "StmtPDF-Android")
         }
         try {
-            if (conn.responseCode in 200..299) conn.contentLengthLong else -1L
+            if (conn.responseCode in 200..299) conn.lengthOrUnknown() else -1L
         } finally {
             conn.disconnect()
         }
@@ -173,8 +179,8 @@ object UpdateChecker {
             }
 
             val total = when {
-                code == HttpURLConnection.HTTP_PARTIAL -> existing + conn.contentLengthLong
-                else -> conn.contentLengthLong
+                code == HttpURLConnection.HTTP_PARTIAL -> existing + conn.lengthOrUnknown()
+                else -> conn.lengthOrUnknown()
             }
             var received = existing
             var lastPercent = -1

@@ -42,8 +42,11 @@ class PdfEngine(context: Context) {
 
     private var readyDeferred = CompletableDeferred<Unit>()
     private var progressCallback: ((Int, Int) -> Unit)? = null
-    private var parseDeferred: CompletableDeferred<JSONObject>? = null
+    @Volatile private var parseDeferred: CompletableDeferred<JSONObject>? = null
     private var exportDeferred: CompletableDeferred<String>? = null
+    // 每次 parse 的请求号：取消后旧任务迟到的回调不会污染下一次解析
+    @Volatile private var requestSeq = 0
+    @Volatile private var activeParseId = 0
 
     val webView: WebView = WebView(context).apply {
         settings.javaScriptEnabled = true
@@ -78,34 +81,41 @@ class PdfEngine(context: Context) {
 
     suspend fun parse(file: File, maxPages: Int, onProgress: (Int, Int) -> Unit): JSONObject {
         awaitReady()
+        val id = ++requestSeq
+        activeParseId = id
         progressCallback = onProgress
         val token = UUID.randomUUID().toString().replace("-", "") + ".pdf"
         files[token] = file
         val deferred = CompletableDeferred<JSONObject>()
         parseDeferred = deferred
-        withContext(Dispatchers.Main) {
-            webView.evaluateJavascript(
-                "StmtEngine.parse('https://appassets.androidplatform.net/local/$token', $maxPages)",
-                null
-            )
-        }
         try {
+            // evaluateJavascript 也可能在挂起期间被取消，必须放在 try 里，保证 finally 一定清理
+            withContext(Dispatchers.Main) {
+                webView.evaluateJavascript(
+                    "StmtEngine.parse('https://appassets.androidplatform.net/local/$token', $maxPages, $id)",
+                    null
+                )
+            }
             return withTimeout(120_000) { deferred.await() }
         } finally {
             files.remove(token)
-            parseDeferred = null
-            progressCallback = null
+            if (activeParseId == id) {
+                activeParseId = 0
+                parseDeferred = null
+                progressCallback = null
+            }
         }
     }
 
-    suspend fun export(kind: String, rowsJson: String, baseName: String): String {
+    suspend fun export(kind: String, rowsJson: String, baseName: String, preset: String = ""): String {
         awaitReady()
         val deferred = CompletableDeferred<String>()
         exportDeferred = deferred
         val script = "StmtEngine.exportFile(" +
             JSONObject.quote(kind) + "," +
             JSONObject.quote(rowsJson) + "," +
-            JSONObject.quote(baseName) + ")"
+            JSONObject.quote(baseName) + "," +
+            JSONObject.quote(preset) + ")"
         withContext(Dispatchers.Main) { webView.evaluateJavascript(script, null) }
         try {
             return withTimeout(60_000) { deferred.await() }
@@ -130,13 +140,16 @@ class PdfEngine(context: Context) {
             if (!readyDeferred.isCompleted) readyDeferred.complete(Unit)
         }
 
+        /** 回调都带请求号：取消后旧任务迟到的进度/结果直接丢弃，不会串到下一次解析。 */
         @JavascriptInterface
-        fun onProgress(no: Int, total: Int) {
+        fun onProgress(reqId: Int, no: Int, total: Int) {
+            if (reqId != activeParseId) return
             progressCallback?.invoke(no, total)
         }
 
         @JavascriptInterface
-        fun onResult(json: String) {
+        fun onResult(reqId: Int, json: String) {
+            if (reqId != activeParseId) return
             val deferred = parseDeferred ?: return
             runCatching { JSONObject(json) }
                 .onSuccess { if (!deferred.isCompleted) deferred.complete(it) }
@@ -149,10 +162,15 @@ class PdfEngine(context: Context) {
         }
 
         @JavascriptInterface
-        fun onError(message: String) {
+        fun onError(reqId: Int, message: String) {
             val err = IllegalStateException(message.ifBlank { "engine_error" })
+            // reqId = 0 表示导出链路（与解析请求号隔离）
+            if (reqId == 0) {
+                exportDeferred?.let { if (!it.isCompleted) it.completeExceptionally(err) }
+                return
+            }
+            if (reqId != activeParseId) return
             parseDeferred?.let { if (!it.isCompleted) it.completeExceptionally(err) }
-            exportDeferred?.let { if (!it.isCompleted) it.completeExceptionally(err) }
         }
     }
 }

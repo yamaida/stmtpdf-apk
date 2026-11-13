@@ -21,8 +21,8 @@ android {
         applicationId = "com.stmtpdf.app"
         minSdk = 23
         targetSdk = 34
-        versionCode = 26
-        versionName = "0.3.12"
+        versionCode = 36
+        versionName = "0.3.22"
     }
 
     signingConfigs {

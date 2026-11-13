@@ -76,7 +76,8 @@
   }
 
   window.StmtEngine = {
-    parse: function (url, maxPages) {
+    parse: function (url, maxPages, reqId) {
+      var rid = (reqId === undefined || reqId === null) ? 0 : reqId;
       fetch(url, { cache: 'no-store' })
         .then(function (r) { return r.arrayBuffer(); })
         .then(function (buf) {
@@ -100,7 +101,7 @@
                   pageLines.push([]);
                 }
                 lines = lines.concat(current);
-                try { AndroidBridge.onProgress(no, pages); } catch (e) { /* ignore */ }
+                try { AndroidBridge.onProgress(rid, no, pages); } catch (e) { /* ignore */ }
                 return step(no + 1);
               });
             });
@@ -112,22 +113,28 @@
               rows: rows, pageLines: pageLines
             };
             try { doc.destroy(); } catch (e) { /* ignore */ }
-            AndroidBridge.onResult(JSON.stringify(result));
+            AndroidBridge.onResult(rid, JSON.stringify(result));
           });
         })
         .catch(function (err) {
-          AndroidBridge.onError(String((err && err.message) || err));
+          AndroidBridge.onError(rid, String((err && err.message) || err));
         });
     },
 
-    exportFile: function (kind, rowsJson, name) {
+    exportFile: function (kind, rowsJson, name, preset) {
       try {
         var rows = JSON.parse(rowsJson);
         var b64;
-        if (kind === 'qbo') {
+        if (kind === 'qbo' || kind === 'qfx') {
           b64 = bytesToBase64(cp1252(window.StmtPdfCore.buildQbo(rows, name)));
+        } else if (kind === 'ofx') {
+          b64 = bytesToBase64(cp1252(window.StmtPdfCore.buildOfx(rows, name)));
+        } else if (kind === 'qif') {
+          b64 = bytesToBase64(cp1252(window.StmtPdfCore.buildQif(rows)));
         } else if (kind === 'csv') {
-          b64 = bytesToBase64(new TextEncoder().encode(window.StmtPdfCore.buildCsv(rows)));
+          b64 = bytesToBase64(new TextEncoder().encode(
+            window.StmtPdfCore.buildCsv(rows, null, preset || 'standard')
+          ));
         } else {
           var data = rows.map(function (r) {
             return {
@@ -145,7 +152,7 @@
         }
         AndroidBridge.onExport(kind, b64);
       } catch (err) {
-        AndroidBridge.onError(String((err && err.message) || err));
+        AndroidBridge.onError(0, String((err && err.message) || err));
       }
     }
   };

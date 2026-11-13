@@ -66,7 +66,7 @@ internal const val ISSUE_LOW = "low"
 
 enum class DocStatus { BAD, IDLE, DONE }
 
-/** 单条交易行：金额/余额/摘要可被用户修正，verified 仅会话内保留。 */
+/** 单条交易行：金额/余额/摘要可被用户修正；改动与 verified 会写成草稿落盘。 */
 class ReviewRow(
     val page: Int?,
     val rawText: String,
@@ -78,6 +78,12 @@ class ReviewRow(
     amount: Double,
     balance: Double?
 ) {
+    // 解析原值：用于判断这一行是否被用户改过（草稿只存改动的行）
+    private val origDate = date
+    private val origDesc = desc
+    private val origAmount = amount
+    private val origBalance = balance
+
     var date by mutableStateOf(date)
     var desc by mutableStateOf(desc)
     var amount by mutableStateOf(amount)
@@ -86,6 +92,14 @@ class ReviewRow(
     var verified by mutableStateOf(false)
 
     val hasIssue: Boolean get() = issue != null
+
+    /** 是否被手动改过。 */
+    val edited: Boolean
+        get() = date != origDate || desc != origDesc ||
+            amount != origAmount || balance != origBalance
+
+    /** 是否需要进草稿：改过或已核对。 */
+    val dirty: Boolean get() = edited || verified
 }
 
 /** 一次解析得到的文件，含原文按页文本用于抽屉上下文。 */
@@ -103,6 +117,9 @@ class ReviewDoc(
     val unverified: Int get() = rows.count { !it.verified }
     val diffCount: Int get() = rows.count { it.issue == ISSUE_DIFF && !it.verified }
     val lowCount: Int get() = rows.count { it.issue == ISSUE_LOW && !it.verified }
+
+    /** 有改动 / 有核对标记：退出前需要落草稿。 */
+    val hasDraft: Boolean get() = rows.any { it.dirty }
 
     val status: DocStatus get() = when {
         pending > 0 -> DocStatus.BAD
@@ -139,7 +156,8 @@ internal fun buildReviewDoc(
     json: JSONObject,
     id: Long,
     displayName: String,
-    pdfPath: String = ""
+    pdfPath: String = "",
+    draft: JSONObject? = null
 ): ReviewDoc {
     val pages = json.optInt("pages", 0)
     val totalPages = json.optInt("totalPages", pages)
@@ -187,8 +205,45 @@ internal fun buildReviewDoc(
         rows = rows,
         pdfPath = pdfPath
     )
+    // 有草稿时先套上用户的修改与核对标记，再按新值重算差异
+    applyDraft(doc, draft)
     recomputeIssues(doc)
     return doc
+}
+
+/** 把草稿里的增量行套回文档（老草稿没有的字段保持解析原值）。 */
+internal fun applyDraft(doc: ReviewDoc, draft: JSONObject?) {
+    val arr = draft?.optJSONArray("rows") ?: return
+    for (i in 0 until arr.length()) {
+        val o = arr.optJSONObject(i) ?: continue
+        val row = doc.rows.getOrNull(o.optInt("i", -1)) ?: continue
+        if (o.has("date")) row.date = o.optString("date", row.date)
+        if (o.has("desc")) row.desc = o.optString("desc", row.desc)
+        if (o.has("amount")) row.amount = o.optDouble("amount", row.amount)
+        if (o.has("balance")) {
+            row.balance = if (o.isNull("balance")) null else o.optDouble("balance", 0.0)
+        }
+        row.verified = o.optBoolean("verified", false)
+    }
+}
+
+/** 落盘用：只导出被改过或已核对的行，附带行号。 */
+internal fun ReviewDoc.draftRows(): JSONArray {
+    val arr = JSONArray()
+    rows.forEachIndexed { index, row ->
+        if (!row.dirty) return@forEachIndexed
+        arr.put(
+            JSONObject().apply {
+                put("i", index)
+                put("date", row.date)
+                put("desc", row.desc)
+                put("amount", row.amount)
+                put("balance", row.balance ?: JSONObject.NULL)
+                put("verified", row.verified)
+            }
+        )
+    }
+    return arr
 }
 
 /** 导出用：只输出内核需要的字段，保持原有 QBO / CSV / XLSX 口径。 */

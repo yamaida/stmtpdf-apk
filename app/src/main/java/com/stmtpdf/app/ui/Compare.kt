@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
@@ -199,7 +201,12 @@ internal fun CompareScreen(
     onClose: () -> Unit,
     onExport: () -> Unit
 ) {
-    val doc = docs.firstOrNull { it.id == activeId } ?: return
+    val doc = docs.firstOrNull { it.id == activeId }
+    if (doc == null) {
+        // 文档已被清除或 id 失配：主动退出，避免父层 compareId 卡在校对状态
+        LaunchedEffect(activeId) { onClose() }
+        return
+    }
     var pageIndex by remember(doc.id) { mutableStateOf(0) }
     var split by remember { mutableStateOf(0.58f) }
     var showAll by remember { mutableStateOf(false) }
@@ -253,7 +260,8 @@ internal fun CompareScreen(
     BackHandler(onBack = onClose)
 
     Column(Modifier.fillMaxSize().background(Pal.Bg)) {
-        CompareHeader(doc, lang, onClose, onExport)
+        val docNumber = docs.indexOfFirst { it.id == doc.id } + 1
+        CompareHeader(doc, docNumber.coerceAtLeast(1), lang, onClose)
         CompareFileChips(docs, doc.id, lang, onSelect) { showAll = true }
 
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
@@ -356,29 +364,67 @@ internal fun CompareScreen(
                     split = (split + delta / heightPx).coerceIn(SPLIT_MIN, SPLIT_MAX)
                 }
 
-                RowsPanel(
-                    doc, lang, selIndex,
-                    onSelect = { index ->
-                        selIndex = index
-                        doc.rows.getOrNull(index)?.page?.let { page ->
-                            pageIndex = (page - 1).coerceIn(0, pageCount - 1)
+                // 行列表区支持右滑返回解析页（PDF 预览区留给缩放/平移手势）
+                Box(
+                    Modifier.weight(1f).padding(start = 12.dp, end = 12.dp, bottom = 2.dp)
+                        .pointerInput(Unit) {
+                            var drag = 0f
+                            var fromEdge = false
+                            val threshold = 72.dp.toPx()
+                            val edge = 48.dp.toPx()
+                            detectHorizontalDragGestures(
+                                // 只认从左边缘起手的右滑，避免长按后横向拖动误退出
+                                onDragStart = { offset ->
+                                    drag = 0f
+                                    fromEdge = offset.x <= edge
+                                },
+                                onDragCancel = { drag = 0f },
+                                onHorizontalDrag = { _, amount -> drag += amount },
+                                onDragEnd = {
+                                    if (fromEdge && drag > threshold) onClose()
+                                    drag = 0f
+                                }
+                            )
                         }
-                        locateTick += 1
-                    },
-                    onEdit = { index ->
-                        selIndex = index
-                        editing = doc.rows.getOrNull(index)
-                    },
-                    onToggle = { index ->
-                        doc.rows.getOrNull(index)?.let { row ->
-                            row.verified = !row.verified
-                            recomputeIssues(doc)
-                        }
-                    },
-                    Modifier.weight(1f).padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
-                )
+                ) {
+                    RowsPanel(
+                        doc, lang, selIndex,
+                        onSelect = { index ->
+                            selIndex = index
+                            doc.rows.getOrNull(index)?.page?.let { page ->
+                                pageIndex = (page - 1).coerceIn(0, pageCount - 1)
+                            }
+                            locateTick += 1
+                        },
+                        onEdit = { index ->
+                            selIndex = index
+                            editing = doc.rows.getOrNull(index)
+                        },
+                        onToggle = { index ->
+                            doc.rows.getOrNull(index)?.let { row ->
+                                row.verified = !row.verified
+                                recomputeIssues(doc)
+                            }
+                        },
+                        Modifier.fillMaxSize()
+                    )
+                }
             }
         }
+
+        CompareFooter(
+            doc = doc,
+            lang = lang,
+            selIndex = selIndex,
+            onJump = { index ->
+                selIndex = index
+                doc.rows.getOrNull(index)?.page?.let { p ->
+                    pageIndex = (p - 1).coerceIn(0, pageCount - 1)
+                }
+                locateTick += 1
+            },
+            onExport = onExport
+        )
     }
 
     if (showAll) {
@@ -415,9 +461,9 @@ internal fun CompareScreen(
 @Composable
 private fun CompareHeader(
     doc: ReviewDoc,
+    number: Int,
     lang: AppLang,
-    onClose: () -> Unit,
-    onExport: () -> Unit
+    onClose: () -> Unit
 ) {
     Row(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 6.dp),
@@ -428,32 +474,87 @@ private fun CompareHeader(
                 .border(1.dp, Pal.Line2, CircleShape).clickable(onClick = onClose),
             contentAlignment = Alignment.Center
         ) {
-            Text("✕", color = Pal.Muted, fontSize = 12.sp)
+            Text("‹", color = Pal.Text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
+            // 文件名带序号，多份对账单时方便对照
             Text(
-                doc.name, color = Pal.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                String.format(java.util.Locale.US, "%02d · %s", number, doc.name),
+                color = Pal.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(3.dp))
             Text(
-                I18n.f(lang, "review_title", doc.pages, doc.totalPages) + " · " +
-                    I18n.f(lang, "review_rows", doc.rows.size),
+                I18n.f(
+                    lang, "review_meta_diff",
+                    doc.totalPages.coerceAtLeast(doc.pages), doc.rows.size, doc.diffCount
+                ),
                 color = Pal.Faint, fontSize = 9.sp
             )
         }
-        Spacer(Modifier.width(8.dp))
-        Box(
-            Modifier.clip(RoundedCornerShape(50)).background(Pal.Teal.copy(alpha = 0.10f))
-                .border(1.dp, Pal.Teal.copy(alpha = 0.55f), RoundedCornerShape(50))
-                .clickable(onClick = onExport)
-                .padding(horizontal = 14.dp, vertical = 7.dp)
+    }
+}
+
+/** 底部统计 + 「下一处差异 / 导出」两个等宽按钮；导出入库从右上角移到这里。 */
+@Composable
+private fun CompareFooter(
+    doc: ReviewDoc,
+    lang: AppLang,
+    selIndex: Int,
+    onJump: (Int) -> Unit,
+    onExport: () -> Unit
+) {
+    val pending = doc.rows.indices.filter {
+        val row = doc.rows[it]
+        row.hasIssue && !row.verified
+    }
+    val next = pending.firstOrNull { it > selIndex } ?: pending.firstOrNull()
+    Column(
+        Modifier.fillMaxWidth().navigationBarsPadding()
+            .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
+    ) {
+        Text(
+            I18n.f(
+                lang, "review_stats_line", doc.rows.size,
+                doc.rows.count { it.verified }, doc.diffCount, doc.lowCount
+            ),
+            color = Pal.Faint, fontSize = 9.5.sp, maxLines = 1
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                I18n.t(lang, "export"), color = Pal.Teal, fontSize = 10.5.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            Box(
+                Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Pal.Panel)
+                    .border(
+                        1.dp,
+                        if (next != null) Pal.Teal.copy(alpha = 0.75f) else Pal.Line2,
+                        RoundedCornerShape(12.dp)
+                    )
+                    .clickable(enabled = next != null) { next?.let(onJump) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    I18n.t(lang, "review_next_diff"),
+                    color = if (next != null) Pal.Teal else Pal.Muted,
+                    fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold
+                )
+            }
+            Box(
+                Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Pal.accentGradient)
+                    .clickable(onClick = onExport),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    I18n.t(lang, "export"), color = Pal.Dark,
+                    fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold
+                )
+            }
         }
     }
 }
@@ -473,17 +574,27 @@ private fun CompareFileChips(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        docs.forEach { item ->
-            DocChip(item.name, item.id == activeId) { onSelect(item.id) }
+        docs.forEachIndexed { index, item ->
+            DocChip(index + 1, item.name, item.id == activeId) { onSelect(item.id) }
         }
         if (docs.size > 5) {
-            DocChip(I18n.f(lang, "all_files", docs.size), false, onClick = onOpenAll)
+            Box(
+                Modifier.clip(RoundedCornerShape(50)).background(Pal.Panel)
+                    .border(1.dp, Pal.Line, RoundedCornerShape(50))
+                    .clickable(onClick = onOpenAll)
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    I18n.f(lang, "all_files", docs.size), color = Pal.Muted,
+                    fontSize = 10.sp, maxLines = 1
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun DocChip(name: String, active: Boolean, onClick: () -> Unit) {
+private fun DocChip(number: Int, name: String, active: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.clip(RoundedCornerShape(50))
             .background(if (active) Pal.Teal.copy(alpha = 0.12f) else Pal.Panel)
@@ -496,10 +607,11 @@ private fun DocChip(name: String, active: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 7.dp)
     ) {
         Text(
-            name, color = if (active) Pal.Text else Pal.Muted, fontSize = 10.sp,
+            String.format(java.util.Locale.US, "%02d  %s", number, name),
+            color = if (active) Pal.Text else Pal.Muted, fontSize = 10.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 140.dp)
+            modifier = Modifier.widthIn(max = 160.dp)
         )
     }
 }
@@ -570,13 +682,14 @@ private fun RowsPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                I18n.t(lang, "field_date") + " · " + I18n.t(lang, "field_desc"),
-                color = Pal.Faint, fontSize = 8.5.sp, letterSpacing = 1.sp, maxLines = 1
+                I18n.t(lang, "review_rows_label"), color = Pal.Muted, fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1
             )
             Spacer(Modifier.weight(1f))
             Text(
-                I18n.t(lang, "field_amount") + " · " + I18n.t(lang, "field_balance"),
-                color = Pal.Faint, fontSize = 8.5.sp, letterSpacing = 1.sp, maxLines = 1
+                I18n.f(lang, "review_diff_low", doc.diffCount, doc.lowCount),
+                color = if (doc.diffCount > 0) Pal.Danger else Pal.Faint,
+                fontSize = 9.sp, maxLines = 1
             )
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF121B22)))

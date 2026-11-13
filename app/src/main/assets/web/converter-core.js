@@ -37,11 +37,11 @@ var HEADER_CONTEXT_WORDS = {
 };
 /* 借/貸列表头：这些列的金额方向由原文列名给出，必须直接采用。 */
 var DEBIT_HEADER_WORDS = {
-  'withdrawal': 1, 'withdrawals': 1, 'debit': 1, 'debits': 1,
+  'withdrawal': 1, 'withdrawals': 1, 'debit': 1, 'debits': 1, 'paid out': 1, 'paid-out': 1, 'money out': 1,
   'chèques': 1, 'débits': 1, '提取': 1, '支出': 1, '支取': 1, '結欠': 1
 };
 var CREDIT_HEADER_WORDS = {
-  'deposit': 1, 'deposits': 1, 'credit': 1, 'credits': 1,
+  'deposit': 1, 'deposits': 1, 'credit': 1, 'credits': 1, 'paid in': 1, 'paid-in': 1, 'money in': 1,
   'dépôts': 1, 'crédits': 1, '存入': 1, '收入': 1, '貸記': 1
 };
 /* 汇总区 / 页脚：出现后丢弃本段内容，余额列锚点随之失效。 */
@@ -285,6 +285,33 @@ function mergeContinuations(entries) {
     if (next && next.page === entry.page && text && text.length <= 80) {
       var nextText = String(next.text || '').trim();
       var nextMoney = moneyCount(nextText);
+      // 交易被拆成「日期行 + 参考号行 + 金额行」三行（HSBC 常见）：三行并成一条
+      if (moneyCount(text) === 0 && nextMoney === 0 && DATE_LINE_RE.test(text)
+        && nextText && nextText.length <= 60 && !DATE_ANY_RE.test(nextText)
+        && !isStopLine(text) && !isSummaryLine(text)
+        && !isStopLine(nextText) && !isSummaryLine(nextText)) {
+        var third = entries[i + 2];
+        if (third && third.page === entry.page) {
+          var thirdText = String(third.text || '').trim();
+          var thirdMoney = moneyCount(thirdText);
+          if (thirdMoney >= 1 && thirdMoney <= 2 && thirdText.length <= 60
+            && !DATE_ANY_RE.test(thirdText)
+            && !isStopLine(thirdText) && !isSummaryLine(thirdText)
+            && text.length + nextText.length + thirdText.length <= 160) {
+            out.push({
+              text: text + ' ' + nextText + ' ' + thirdText,
+              page: entry.page,
+              bbox: mergeBox(mergeBox(entry.bbox, next.bbox), third.bbox),
+              words: entry.words && next.words && third.words
+                ? entry.words.concat(next.words, third.words) : null,
+              width: entry.width,
+              merged: true
+            });
+            i += 2;
+            continue;
+          }
+        }
+      }
       if (moneyCount(text) === 0
         && nextMoney >= 1 && nextMoney <= 2
         && nextText.length <= 60
@@ -379,7 +406,21 @@ function isStopLine(text) {
   for (var i = 0; i < STOP_WORDS.length; i++) {
     if (lowered.indexOf(STOP_WORDS[i]) >= 0) { return true; }
   }
+  // pdf.js 会把字距拉开的页脚拆成单字符（"C re dit inte re st"），去空格后再判断
+  var squashed = lowered.replace(/\s+/g, '');
+  if (squashed.indexOf('creditinterestisnotapplied') >= 0) { return true; }
+  if (squashed.indexOf('debitinterest') >= 0) { return true; }
   return false;
+}
+
+/* 期初/期末余额过渡行：只跳过该行，不能像汇总区那样清掉表格列锚点。 */
+function isOpeningClosingLine(text) {
+  var value = String(text || '').replace(/\s+/g, ' ').trim();
+  var lower = value.toLowerCase();
+  if (/balance\s*(?:brought|carried)\s*forward|balance(?:brought|carried)forward/.test(lower)) {
+    return true;
+  }
+  return /^(?:\d{1,2}[\s./-]*[A-Za-z]{3,10}\.?\s+|\d{1,4}[./-]\d{1,2}[./-]\d{1,4}\s*)?(?:start|opening|end|closing)\s+balance/i.test(value);
 }
 
 function isAccountTitle(text) {
@@ -454,6 +495,30 @@ function mergeThousands(tokens) {
 
 /* 表头行：必须同时出现余额词和一个其它列名，避免把 "Balance as of" 当表头。 */
 function balanceHeaderInfo(tokens) {
+  // OCR/文本层常把 "Money out" 拆成两个词：先并回一个表头词
+  var joined = [];
+  for (var t = 0; t < tokens.length; t++) {
+    var firstWord = tokens[t];
+    var secondWord = tokens[t + 1];
+    var combo = secondWord
+      ? (tokenText(firstWord) + ' ' + tokenText(secondWord)).toLowerCase().replace(/\s+/g, ' ').trim()
+      : '';
+    if (/^(?:paid|money)\s+(?:out|in)$/.test(combo)
+      && typeof firstWord.x === 'number' && typeof secondWord.x === 'number') {
+      joined.push({
+        text: combo,
+        x: firstWord.x,
+        y: firstWord.y,
+        w: (secondWord.x + (secondWord.w || 0)) - firstWord.x,
+        h: firstWord.h || secondWord.h || 8
+      });
+      t += 1;
+      continue;
+    }
+    joined.push(firstWord);
+  }
+  tokens = joined;
+
   var hasBalance = false;
   var hasContext = false;
   var x0 = Infinity;
@@ -632,7 +697,7 @@ function scoreRow(row, previous, moneyCount, strictDate) {
 }
 
 /* 差异：上一行余额与本行金额勾稽不上；低置信：缺余额、金额列过多或置信度低于阈值。 */
-function issueForRow(row, previous) {
+function issueForRow(row, previous, hasBalance) {
   if (previous && row.balance !== null && previous.balance !== null) {
     var asc = Math.round((previous.balance + row.amount) * 100) / 100;
     var desc = Math.round((previous.balance - row.amount) * 100) / 100;
@@ -640,7 +705,8 @@ function issueForRow(row, previous) {
       return 'diff';
     }
   }
-  if (row.balance === null) { return 'low'; }
+  // 整份账单都无余额列（信用卡账单）时，缺余额不算异常
+  if (hasBalance !== false && row.balance === null) { return 'low'; }
   if (row.moneyCount > 2) { return 'low'; }
   if (row.amountInferred) { return 'low'; }
   if (row.conf < 70 || row.balanceSuspect) { return 'low'; }
@@ -657,7 +723,11 @@ function parseStatementLines(lines) {
   var yearHint = null;
   for (var i = 0; i < entries.length; i++) {
     var probe = DATE_ANY_RE.exec(entries[i].text);
-    if (probe && probe[1]) { yearHint = Number(probe[1]); break; }
+    // 账号/流水号里的数字串会被 ISO 规则误认成日期，年份必须落在合理区间
+    if (probe && probe[1]) {
+      var probeYear = Number(probe[1]);
+      if (probeYear >= 1990 && probeYear <= 2100) { yearHint = probeYear; break; }
+    }
   }
   if (!yearHint) {
     for (var j = 0; j < entries.length; j++) {
@@ -702,7 +772,7 @@ function collectRows(entries, yearHint, loose, dayFirst) {
   var rows = [];
   var state = {
     page: null, band: null, debit: null, credit: null,
-    headerSeen: false, account: 0, accountLabel: '', chainBalance: null
+    headerSeen: false, account: 0, accountLabel: '', chainBalance: null, lastDate: null
   };
 
   entries.forEach(function (entry) {
@@ -747,6 +817,7 @@ function collectRows(entries, yearHint, loose, dayFirst) {
       state.debit = null;
       state.credit = null;
       state.headerSeen = false;
+      state.lastDate = null;
       return;
     }
     if (isPageMark(text)) { return; }
@@ -756,11 +827,14 @@ function collectRows(entries, yearHint, loose, dayFirst) {
       state.credit = null;
       state.headerSeen = false;
       state.chainBalance = null;
+      state.lastDate = null;
       return;
     }
     if (isSummaryLine(text)) { return; }
+    if (isOpeningClosingLine(text)) { return; }
 
     var parsed = parseLine(text, yearHint, loose || entry.merged === true, dayFirst);
+    var carriedRow = false;
     if (!parsed && entry.recovered) {
       // 日期是从叠印乱码里恢复的 dd.mm，按整份账单的日/月顺序换算成 ISO
       var recoveredIso = recoveredDate(entry.recovered, yearHint, dayFirst);
@@ -774,6 +848,13 @@ function collectRows(entries, yearHint, loose, dayFirst) {
           dateEnd: 0
         };
       }
+    }
+    if (!parsed && state.lastDate && /[A-Za-z]/.test(text)) {
+      // 同一天的多笔交易只有首行印日期（RBC / HSBC 版式），沿用上一行日期
+      var carried = /[£$€]?\d+[.,]\d{2}/.test(text)
+        ? parseLine(state.lastDate + ' ' + text, yearHint, false, dayFirst)
+        : null;
+      if (carried) { parsed = carried; carriedRow = true; }
     }
     if (!parsed) { return; }
 
@@ -802,6 +883,17 @@ function collectRows(entries, yearHint, loose, dayFirst) {
       picked = { text: '', amount: parsed.amount, x: null, w: 0, marker: '' };
     }
     if (!picked) { return; }
+
+    if (carriedRow) {
+      // 补行必须金额非 0、行足够短，且落在已知的金额/余额列（若有），避免页脚/水印残行混入
+      var plausible = Math.abs(picked.amount) >= 0.005
+        && text.length <= 90 && parsed.moneyCount <= 2;
+      if (!plausible) { return; }
+      var anyBand = state.band || state.debit || state.credit;
+      var inAnyBand = inBand(picked, state.band)
+        || inBand(picked, state.debit) || inBand(picked, state.credit);
+      if (anyBand && !inAnyBand) { return; }
+    }
 
     // 原文自带方向（负号/括号/尾随减号/DR、CR/借貸列）时直接采用。
     var amount = picked.amount;
@@ -847,6 +939,7 @@ function collectRows(entries, yearHint, loose, dayFirst) {
       amountInferred: amountInferred
     });
     state.chainBalance = balance;
+    state.lastDate = parsed.date;
   });
   return rows;
 }
@@ -918,10 +1011,15 @@ function markBalanceSuspect(rows) {
 }
 
 function markRows(rows) {
+  var hasBalance = rows.some(function (row) { return row.balance !== null; });
   var previous = null;
   rows.forEach(function (row) {
+    if (!hasBalance) {
+      // scoreRow 把「无余额」按 10 分计；整份账单都没有余额列时补回 20 分
+      row.conf = clamp(row.conf + 20, 0, 100);
+    }
     if (previous && previous.segment !== row.segment) { previous = null; }
-    row.issue = issueForRow(row, previous);
+    row.issue = issueForRow(row, previous, hasBalance);
     row.verified = row.issue === null;
     previous = row;
   });
@@ -930,11 +1028,12 @@ function markRows(rows) {
 
 /* 编辑单元格后重算：余额保留打印值，只刷新差异标记与勾稽状态。 */
 function recheckRows(rows) {
+  var hasBalance = rows.some(function (row) { return row.balance !== null; });
   markBalanceSuspect(rows);
   var previous = null;
   rows.forEach(function (row) {
     if (previous && previous.segment !== row.segment) { previous = null; }
-    row.issue = issueForRow(row, previous);
+    row.issue = issueForRow(row, previous, hasBalance);
     if (row.issue === null) { row.verified = true; }
     previous = row;
   });
@@ -1108,9 +1207,11 @@ function qboStatement(group, seq) {
   return lines;
 }
 
-/** 生成 QBO（OFX 1.0.2 SGML），口径与桌面端 app/core/qbo.py 一致；多账户各自一个 <STMTRS>。 */
-function buildQbo(rows, accountName) {
+/** 生成 QBO（OFX 1.0.2 SGML），口径与桌面端 app/core/qbo.py 一致；多账户各自一个 <STMTRS>。
+ *  opts.intuBid === false 时输出通用 OFX（不带 INTU.BID）。 */
+function buildQbo(rows, accountName, opts) {
   if (!rows.length) { return ''; }
+  var withBid = !(opts && opts.intuBid === false);
   var now = ofxNow();
   var eol = '\r\n';
 
@@ -1121,9 +1222,9 @@ function buildQbo(rows, accountName) {
   ];
   lines.push('<OFX>', '<SIGNONMSGSRSV1>', '<SONRS>', '<STATUS>', '<CODE>0',
     '<SEVERITY>INFO', '</STATUS>', '<DTSERVER>' + now, '<LANGUAGE>ENG',
-    '<DTPROFUP>' + now, '<FI>', '<ORG>StmtPdf', '<FID>10001', '</FI>',
-    '<INTU.BID>3000', '</SONRS>', '</SIGNONMSGSRSV1>',
-    '<BANKMSGSRSV1>');
+    '<DTPROFUP>' + now, '<FI>', '<ORG>StmtPdf', '<FID>10001', '</FI>');
+  if (withBid) { lines.push('<INTU.BID>3000'); }
+  lines.push('</SONRS>', '</SIGNONMSGSRSV1>', '<BANKMSGSRSV1>');
   qboGroups(rows, accountName).forEach(function (group, index) {
     lines = lines.concat(qboStatement(group, index + 1));
   });
@@ -1132,26 +1233,78 @@ function buildQbo(rows, accountName) {
   return lines.join(eol) + eol;
 }
 
+/** 通用 OFX：与 QBO 同一正文，去掉 Intuit 银行标识。 */
+function buildOfx(rows, accountName) {
+  return buildQbo(rows, accountName, { intuBid: false });
+}
+
+/** QIF：Quicken / GnuCash 交换格式（一行一个字段，^ 结束一笔）。 */
+function buildQif(rows) {
+  var lines = ['!Type:Bank'];
+  rows.forEach(function (row) {
+    var iso = String(row.date || '');
+    var parts = iso.split('-');
+    var dateText = parts.length === 3 ? (parts[1] + '/' + parts[2] + '/' + parts[0]) : iso;
+    var desc = String(row.desc || 'Transaction').replace(/[\r\n]+/g, ' ').slice(0, 80);
+    lines.push('D' + dateText);
+    lines.push('T' + Number(row.amount).toFixed(2));
+    lines.push('P' + desc);
+    lines.push('^');
+  });
+  return lines.join('\r\n') + '\r\n';
+}
+
 function csvCell(value) {
   var text = String(value === undefined || value === null ? '' : value);
   return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
 }
 
-function buildCsv(rows, headers) {
+var CSV_PRESET_HEADERS = {
+  standard: ['Date', 'Description', 'Amount', 'Balance', 'Account'],
+  xero: ['*Date', '*Amount', 'Payee', '*Description', 'Reference', 'Currency'],
+  sage: ['Date', 'Reference', 'Narrative', 'Amount', 'Type'],
+  freshbooks: ['Date', 'Description', 'Amount', 'Account', 'Currency'],
+  tally: ['Date', 'Narration', 'Amount', 'Balance', 'Voucher Type']
+};
+
+function csvDate(iso, style) {
+  var parts = String(iso || '').split('-');
+  if (parts.length !== 3) { return String(iso || ''); }
+  if (style === 'dmy') { return parts[2] + '/' + parts[1] + '/' + parts[0]; }
+  if (style === 'compact') { return parts[0] + parts[1] + parts[2]; }
+  return iso;
+}
+
+function buildCsv(rows, headers, preset) {
   var head = headers || {};
-  var lines = [[
-    csvCell(head.date || 'Date'),
-    csvCell(head.desc || 'Description'),
-    csvCell(head.amount || 'Amount'),
-    csvCell(head.balance || 'Balance'),
-    csvCell(head.account || 'Account')
-  ].join(',')];
+  var name = CSV_PRESET_HEADERS[preset] ? preset : 'standard';
+  var titles = CSV_PRESET_HEADERS[name].slice(0);
+  if (name === 'standard') {
+    titles = [
+      head.date || 'Date', head.desc || 'Description', head.amount || 'Amount',
+      head.balance || 'Balance', head.account || 'Account'
+    ];
+  }
+  var lines = [titles.map(csvCell).join(',')];
   rows.forEach(function (row) {
-    lines.push([
-      row.date, csvCell(row.desc), Number(row.amount).toFixed(2),
-      row.balance === null ? '' : Number(row.balance).toFixed(2),
-      csvCell(row.account || '')
-    ].join(','));
+    var amount = Number(row.amount).toFixed(2);
+    var balance = row.balance === null || row.balance === undefined ? '' : Number(row.balance).toFixed(2);
+    var desc = csvCell(row.desc || '');
+    var account = csvCell(row.account || '');
+    var currency = csvCell(row.currency || '');
+    if (name === 'xero') {
+      lines.push([csvDate(row.date, 'iso'), amount, desc, desc, '', currency].join(','));
+    } else if (name === 'sage') {
+      lines.push([csvDate(row.date, 'dmy'), '', desc, amount,
+        Number(row.amount) > 0 ? 'Receipt' : 'Payment'].join(','));
+    } else if (name === 'freshbooks') {
+      lines.push([csvDate(row.date, 'iso'), desc, amount, account, currency].join(','));
+    } else if (name === 'tally') {
+      lines.push([csvDate(row.date, 'compact'), desc, amount, balance,
+        Number(row.amount) > 0 ? 'Receipt' : 'Payment'].join(','));
+    } else {
+      lines.push([row.date, desc, amount, balance, account].join(','));
+    }
   });
   return '\uFEFF' + lines.join('\r\n') + '\r\n';
 }
@@ -1168,5 +1321,7 @@ window.StmtPdfCore = {
   trnType: trnType,
   ofxDate: ofxDate,
   buildQbo: buildQbo,
+  buildOfx: buildOfx,
+  buildQif: buildQif,
   buildCsv: buildCsv
 };
