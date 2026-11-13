@@ -43,9 +43,9 @@ object LocalStats {
     private const val KEY_TODAY_DATE = "usage_today_date"
     private const val KEY_ASK_SAVE = "ask_save_location"
     private const val KEY_EXPORT_DIR = "export_dir"
-    private const val TASK_LIMIT = 10
+    private const val TASK_LIMIT = 30
 
-    /** 最近任务，按时间倒序，最多 10 条。 */
+    /** 最近任务，按时间倒序，最多 30 条。 */
     fun tasks(context: Context): List<HistoryTask> {
         val raw = prefs(context).getString(KEY_TASKS, null) ?: return migrate(context)
         return try {

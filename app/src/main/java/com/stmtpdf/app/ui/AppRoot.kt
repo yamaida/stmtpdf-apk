@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,10 +45,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -57,6 +60,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -136,6 +140,10 @@ import java.util.Locale
 object AppEvents {
     val pendingReturn = mutableStateOf<Uri?>(null)
 }
+
+/** 首页最近记录折叠条数；「查看全部」每次再展开一页。 */
+private const val RECENT_HOME_LIMIT = 5
+private const val RECENT_PAGE_SIZE = 10
 
 @Composable
 fun StmtTheme(content: @Composable () -> Unit) {
@@ -806,6 +814,8 @@ private fun HomeScreen(
     var saveJob by remember { mutableStateOf<Job?>(null) }
     // 近 7 天草稿（按文件 id）：首页「最近记录」显示未核对行数
     var drafts by remember { mutableStateOf<Map<Long, DraftMeta>>(emptyMap()) }
+    // 首页最近记录只显示 5 条，更多走「查看全部」全屏列表（每页 10 条）
+    var showAllRecent by remember { mutableStateOf(false) }
 
     // 选择导出目录：长期授权，之后导出直接写进去
     val pickExportDir = rememberLauncherForActivityResult(
@@ -935,6 +945,52 @@ private fun HomeScreen(
             return
         }
         confirmLeaveReview = true
+    }
+
+    /** 打开一条最近记录：内存里已有就直接进，否则从磁盘读（带草稿续接）。 */
+    fun openTask(task: HistoryTask) {
+        val ids = task.files.map { it.id }
+        val missing = ids.filter { id -> docs.none { it.id == id } }
+        if (missing.isEmpty()) {
+            val first = docs.firstOrNull { it.id == ids.first() }
+            if (first != null) openReview(first)
+            else onNotify(I18n.t(lang, "record_gone"), null)
+            return
+        }
+        scope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                missing.mapNotNull { id ->
+                    val draft = StatementStore.loadDraft(context, id)
+                    StatementStore.load(context, id)?.let { record ->
+                        buildReviewDoc(record.json, id, record.name, record.pdfPath, draft)
+                    }
+                }
+            }
+            if (loaded.isEmpty()) {
+                onNotify(I18n.t(lang, "record_gone"), null)
+            } else {
+                docs = docs + loaded
+                // 按任务内的文件顺序进入第一份
+                val first = loaded.firstOrNull { it.id == ids.first() } ?: loaded.first()
+                openReview(first)
+            }
+        }
+    }
+
+    /** 删除一条最近记录：连解析落盘、草稿与内存态一起清掉。 */
+    fun deleteTask(task: HistoryTask) {
+        scope.launch {
+            val ids = task.files.map { it.id }
+            withContext(Dispatchers.IO) {
+                LocalStats.removeTask(context, task.no)
+                ids.forEach { StatementStore.delete(context, it) }
+            }
+            history = LocalStats.tasks(context)
+            docs = docs.filterNot { it.id in ids }
+            docSources = docSources - ids.toSet()
+            drafts = drafts - ids.toSet()
+            if (activeId in ids) resetToHome()
+        }
     }
 
     /**
@@ -1478,50 +1534,9 @@ private fun HomeScreen(
                 tasks = history,
                 drafts = drafts,
                 lang = lang,
-                onOpen = { task ->
-                    val ids = task.files.map { it.id }
-                    val missing = ids.filter { id -> docs.none { it.id == id } }
-                    if (missing.isEmpty()) {
-                        val first = docs.firstOrNull { it.id == ids.first() }
-                        if (first != null) openReview(first)
-                        else onNotify(I18n.t(lang, "record_gone"), null)
-                    } else {
-                        scope.launch {
-                            val loaded = withContext(Dispatchers.IO) {
-                                missing.mapNotNull { id ->
-                                    val draft = StatementStore.loadDraft(context, id)
-                                    StatementStore.load(context, id)?.let { record ->
-                                        buildReviewDoc(
-                                            record.json, id, record.name, record.pdfPath, draft
-                                        )
-                                    }
-                                }
-                            }
-                            if (loaded.isEmpty()) {
-                                onNotify(I18n.t(lang, "record_gone"), null)
-                            } else {
-                                docs = docs + loaded
-                                // 按任务内的文件顺序进入第一份
-                                val first = loaded.firstOrNull { it.id == ids.first() } ?: loaded.first()
-                                openReview(first)
-                            }
-                        }
-                    }
-                },
-                onDelete = { task ->
-                    scope.launch {
-                        val ids = task.files.map { it.id }
-                        withContext(Dispatchers.IO) {
-                            LocalStats.removeTask(context, task.no)
-                            ids.forEach { StatementStore.delete(context, it) }
-                        }
-                        history = LocalStats.tasks(context)
-                        docs = docs.filterNot { it.id in ids }
-                        docSources = docSources - ids.toSet()
-                        drafts = drafts - ids.toSet()
-                        if (activeId in ids) resetToHome()
-                    }
-                },
+                onOpen = { task -> openTask(task) },
+                onShowAll = { showAllRecent = true },
+                onDelete = { task -> deleteTask(task) },
                 onClear = {
                     scope.launch {
                         withContext(Dispatchers.IO) { StatementStore.clear(context) }
@@ -1651,6 +1666,21 @@ private fun HomeScreen(
                 activeId = it
             },
             onDismiss = { showPicker = false }
+        )
+    }
+
+    // 最近记录「查看全部」：全屏列表，每页 10 条，下拉加载更多
+    if (showAllRecent) {
+        RecentAllSheet(
+            tasks = history,
+            drafts = drafts,
+            lang = lang,
+            onOpen = { task ->
+                showAllRecent = false
+                openTask(task)
+            },
+            onDelete = { task -> deleteTask(task) },
+            onDismiss = { showAllRecent = false }
         )
     }
 
@@ -2744,16 +2774,29 @@ private fun FormatCard(
     }
 }
 
-/** 最近记录：一条 = 一次解析任务；整段可点进入校对，右侧可单条删除，标题右侧可清空。 */
+/** 近期草稿：任务内任一份有草稿就显示，行数按有草稿的文件累计。 */
+private fun draftOfTask(task: HistoryTask, drafts: Map<Long, DraftMeta>): DraftMeta? =
+    task.files.mapNotNull { drafts[it.id] }
+        .reduceOrNull { a, b ->
+            DraftMeta(
+                maxOf(a.updatedAt, b.updatedAt),
+                a.unverified + b.unverified,
+                a.pending + b.pending
+            )
+        }
+
+/** 最近记录：一条 = 一次解析任务；首页只显示 5 条，更多进「查看全部」。 */
 @Composable
 private fun RecentSection(
     tasks: List<HistoryTask>,
     drafts: Map<Long, DraftMeta>,
     lang: AppLang,
     onOpen: (HistoryTask) -> Unit,
+    onShowAll: () -> Unit,
     onDelete: (HistoryTask) -> Unit,
     onClear: () -> Unit
 ) {
+    val shown = tasks.take(RECENT_HOME_LIMIT)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             I18n.t(lang, "recent"), color = Pal.Muted,
@@ -2779,25 +2822,114 @@ private fun RecentSection(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp)
                 )
             } else {
-                tasks.forEachIndexed { index, item ->
+                shown.forEachIndexed { index, item ->
                     if (index > 0) {
                         Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF16222A)))
                     }
                     HistoryRow(
                         item, index % 2 == 1, lang,
-                        // 任务内任一份有草稿就显示；行数按有草稿的文件累计
-                        draft = item.files.mapNotNull { drafts[it.id] }
-                            .reduceOrNull { a, b ->
-                                DraftMeta(
-                                    maxOf(a.updatedAt, b.updatedAt),
-                                    a.unverified + b.unverified,
-                                    a.pending + b.pending
-                                )
-                            },
+                        draft = draftOfTask(item, drafts),
                         onClick = { onOpen(item) },
                         onDelete = { onDelete(item) }
                     )
                 }
+                if (tasks.size > shown.size) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF16222A)))
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(onClick = onShowAll)
+                            .padding(horizontal = 4.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            I18n.f(lang, "recent_more", tasks.size),
+                            color = Pal.Teal, fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text("›", color = Pal.Teal, fontSize = 15.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 最近记录全文列表：每页 10 条，点「加载更多」再展开下一页。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecentAllSheet(
+    tasks: List<HistoryTask>,
+    drafts: Map<Long, DraftMeta>,
+    lang: AppLang,
+    onOpen: (HistoryTask) -> Unit,
+    onDelete: (HistoryTask) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var visible by remember(tasks.size) {
+        mutableStateOf(minOf(tasks.size, RECENT_PAGE_SIZE).coerceAtLeast(1))
+    }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Pal.Panel,
+        contentColor = Pal.Text,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = Pal.Line2) }
+    ) {
+        Column(
+            Modifier.fillMaxWidth().fillMaxHeight(0.9f).padding(horizontal = 20.dp)
+                .navigationBarsPadding().padding(bottom = 14.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    I18n.t(lang, "recent_all_title"), color = Pal.Text,
+                    fontSize = 17.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    I18n.f(lang, "recent_all_count", tasks.size),
+                    color = Pal.Muted, fontSize = 10.sp
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "✕", color = Pal.Faint, fontSize = 13.sp,
+                    modifier = Modifier.clip(CircleShape).clickable(onClick = onDismiss)
+                        .padding(8.dp)
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                tasks.take(visible).forEachIndexed { index, item ->
+                    if (index > 0) {
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF16222A)))
+                    }
+                    HistoryRow(
+                        item, index % 2 == 1, lang,
+                        draft = draftOfTask(item, drafts),
+                        onClick = { onOpen(item) },
+                        onDelete = { onDelete(item) }
+                    )
+                }
+                if (visible < tasks.size) {
+                    Spacer(Modifier.height(10.dp))
+                    Box(
+                        Modifier.fillMaxWidth().height(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, Pal.Line2, RoundedCornerShape(10.dp))
+                            .clickable {
+                                visible = minOf(tasks.size, visible + RECENT_PAGE_SIZE)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            I18n.f(lang, "recent_load_more", tasks.size - visible),
+                            color = Pal.Muted, fontSize = 11.5.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
             }
         }
     }
